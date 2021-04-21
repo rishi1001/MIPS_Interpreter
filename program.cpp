@@ -5,6 +5,8 @@ using namespace std;
 int ROW_ACCESS_DELAY = 10;
 int COL_ACCESS_DELAY = 2;
 const bool OPTIMIZE = true;
+const bool VERBROSE = true;
+const int MAX_CPUS = 16;
 
 struct instruction {
     string func;
@@ -32,13 +34,13 @@ struct job {
 };
 
 // Various global variables for keeping track of data
-int pc[16];
-int line[16];
-int line_number[16];
-int cycles[16];              // cycles after which a particular cpus work is done
+int pc[MAX_CPUS];
+int line[MAX_CPUS];
+int line_number[MAX_CPUS];
+int cycles[MAX_CPUS];
 int mem[1 << 18];
-int regs[16][1 << 5];
-int cpus,m;    // take input from user
+int regs[MAX_CPUS][1 << 5];
+int cpus, m;
 int tot_cycles;
 int tot_lines;
 
@@ -50,17 +52,16 @@ string curr_cmd;
 int curr_end;
 
 // Storing the instructions and jobs
-map<int, instruction> mp[16];
+map<int, instruction> mp[MAX_CPUS];
 map<string, int> name_regs;
 map<int, string> regs_name;
-map<string, int> tags;                         // this also an array of maps?
-map<int, int> line_to_number;
-
-/**** Changes after minor started ****/
+map<string, int> tags[MAX_CPUS];
+map<int, int> line_to_number[MAX_CPUS];
 
 queue<job> jobs;
-deque<request> requests[16][32];
-int unsafe_reg[16];
+deque<request> requests[MAX_CPUS][32];
+deque<int> blah[1 << 18];
+int unsafe_reg[MAX_CPUS];
 
 string trim(string str, string whitespace = " \t") {
     const auto strBegin = str.find_first_not_of(whitespace);
@@ -82,157 +83,80 @@ bool requests_pending() {
     return res;
 }
 
+void load_request_helper(struct request req, int type) {
+    if(type >= 3) jobs.push({"row_write", req.reg, req.loc, req.line});
+    if(type >= 2) jobs.push({"row_read", req.reg, req.loc, req.line});
+    if(req.type == "lw") jobs.push({"col_read", req.reg, req.loc, req.line});
+    else jobs.push({"col_write", req.reg, req.loc, req.line});
+}
+
 void load_request() {
-    if(buff_row == -1) {
-        int min_cycle = cycles+1, load_reg = -1;     
+    int load_cpu = -1, load_reg = -1, type = -1;
+    bool found = false;
 
-        if (unsafe_reg[curr_cpu] != -1 && !requests[curr_cpu][unsafe_reg[curr_cpu]].empty()){          // loops for curr_cpu
-            int load_row = requests[curr_cpu][unsafe_reg[curr_cpu]].front().loc/1024;
-            for(int i = 0; i < 32; i++) {
-                if(requests[curr_cpu][i].size() != 0 && requests[curr_cpu][i].front().loc/1024 == load_row) {
-                    if (requests[curr_cpu][i].front().req_cycle < min_cycle){
-                        min_cycle = requests[curr_cpu][i].front().req_cycle;
-                        load_reg = i;
-                    }
-                }
-            }
-            if(requests[curr_cpu][load_reg].front().type == "lw") {
-                job job1 = {"row_read", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                job job2 = {"col_read", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                jobs.push(job1);
-                jobs.push(job2);
-            } else {
-                job job1 = {"row_read", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                job job2 = {"col_write", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                jobs.push(job1);
-                jobs.push(job2);
-            }
-            requests[curr_cpu][load_reg].pop_front();
-            if (unsafe_reg[curr_cpu] != -1 && requests[curr_cpu][unsafe_reg[curr_cpu]].empty()) unsafe_reg[curr_cpu] = -1;
-            return;
-        }
-        
-        for(int i = 0; i < 32; i++) {
-            if(requests[curr_cpu][i].size() != 0) {
-                if (requests[curr_cpu][i].front().req_cycle < min_cycle){
-                    min_cycle = requests[curr_cpu][i].front().req_cycle;
-                    load_reg = i;
-                }
-            }
-        }
-        if(requests[curr_cpu][load_reg].front().type == "lw") {
-            job job1 = {"row_read", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-            job job2 = {"col_read", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-            jobs.push(job1);
-            jobs.push(job2);
-        } else {
-            job job1 = {"row_read", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-            job job2 = {"col_write", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-            jobs.push(job1);
-            jobs.push(job2);
-        }
-        requests[curr_cpu][load_reg].pop_front();
-        if (unsafe_reg[curr_cpu] != -1 && requests[curr_cpu][unsafe_reg[curr_cpu]].empty()) unsafe_reg[curr_cpu] = -1;
-
-    } else {
-        bool found = false;
-        int min_cycle = cycles+1, load_reg = -1;
-        for(int i = 0; i < 32; i++) {
-            if(requests[curr_cpu][i].size() != 0 && requests[curr_cpu][i].front().loc/1024 == buff_row) {
+    for(int i = 0; i < cpus; i++) {
+        for(int j = 0; j < 32; j++) {
+            if(requests[i][j].size() != 0 && requests[i][j].front().loc/1024 == buff_row && requests[i][j].front().req_cycle == blah[requests[i][j].front().loc/4].front()) {
                 found = true;
-                if (requests[curr_cpu][i].front().req_cycle < min_cycle){
-                    min_cycle = requests[curr_cpu][i].front().req_cycle;
-                    load_reg = i;
-                }
+                load_cpu = i;
+                load_reg = j;
             }
         }
-        if (found) {
-            if(requests[curr_cpu][load_reg].front().type == "lw") {
-                job job1 = {"col_read", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                jobs.push(job1);
-            } else {
-                job job1 = {"col_write", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                jobs.push(job1);
-            }
-            requests[curr_cpu][load_reg].pop_front();
-            if (unsafe_reg[curr_cpu] != -1 && requests[curr_cpu][unsafe_reg[curr_cpu]].empty()) unsafe_reg[curr_cpu] = -1;
-        }
-        
-        if(!found) {
-            if (unsafe_reg[curr_cpu] != -1 && !requests[curr_cpu][unsafe_reg[curr_cpu]].empty()) {
-                int load_row = requests[curr_cpu][unsafe_reg[curr_cpu]].front().loc/1024;
-                for(int i = 0; i < 32; i++) {
-                    if(requests[curr_cpu][i].size() != 0 && requests[curr_cpu][i].front().loc/1024 == load_row) {
-                        if (requests[curr_cpu][i].front().req_cycle<min_cycle){
-                            min_cycle=requests[curr_cpu][i].front().req_cycle;
-                            load_reg=i;
+    }
+
+    if(found) type = 1;
+    else {
+        if(buff_row == -1) type = 2;
+        else type = 3;
+
+        int load_row = -1;
+        for(int i = 0; i < cpus; i++) {
+            if(unsafe_reg[i] != -1 && !requests[i][unsafe_reg[i]].empty()) {
+                load_row = requests[i][unsafe_reg[i]].front().loc/1024;
+                for(int i = 0; i < cpus; i++) {
+                    for(int j = 0; j < 32; j++) {
+                        if(requests[i][j].size() != 0 && requests[i][j].front().loc/1024 == load_row && requests[i][j].front().req_cycle == blah[requests[i][j].front().loc/4].front()) {
+                            found = true;
+                            load_cpu = i;
+                            load_reg = j;
                         }
                     }
                 }
-                if(requests[curr_cpu][load_reg].front().type == "lw") {
-                    job job1 = {"row_write", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                    job job2 = {"row_read", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                    job job3 = {"col_read", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                    jobs.push(job1);
-                    jobs.push(job2);
-                    jobs.push(job3);
-                } else {
-                    job job1 = {"row_write", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                    job job2 = {"row_read", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                    job job3 = {"col_write", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                    jobs.push(job1);
-                    jobs.push(job2);
-                    jobs.push(job3);
-                }
-                requests[curr_cpu][load_reg].pop_front();
-                if (unsafe_reg[curr_cpu] != -1 && requests[curr_cpu][unsafe_reg[curr_cpu]].empty()) unsafe_reg[curr_cpu] = -1;
-                return;
             }
+        }
 
-            for(int i = 0; i < 32; i++) {
-                if(requests[curr_cpu][i].size() != 0) {
-                    if (requests[curr_cpu][i].front().req_cycle < min_cycle){
-                        min_cycle = requests[curr_cpu][i].front().req_cycle;
-                        load_reg = i;
+        if(!found) {
+            for(int i = 0; i < cpus; i++) {
+                for(int j = 0; j < 32; j++) {
+                    if(requests[i][j].size() != 0 && requests[i][j].front().req_cycle == blah[requests[i][j].front().loc/4].front()) {
+                        load_cpu = i;
+                        load_reg = j;
                     }
                 }
             }
-
-            if(requests[curr_cpu][load_reg].front().type == "lw") {
-                job job1 = {"row_write", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                job job2 = {"row_read", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                job job3 = {"col_read", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                jobs.push(job1);
-                jobs.push(job2);
-                jobs.push(job3);
-            } else {
-                job job1 = {"row_write", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                job job2 = {"row_read", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                job job3 = {"col_write", requests[curr_cpu][load_reg].front().reg, requests[curr_cpu][load_reg].front().loc, requests[curr_cpu][load_reg].front().line};
-                jobs.push(job1);
-                jobs.push(job2);
-                jobs.push(job3);
-            }
-            requests[curr_cpu][load_reg].pop_front();
-            if (unsafe_reg[curr_cpu] != -1 && requests[curr_cpu][unsafe_reg[curr_cpu]].empty()) unsafe_reg[curr_cpu] = -1;
-        }
+        }  
     }
+
+    load_request_helper(requests[load_cpu][load_reg].front(), type);
+    blah[requests[load_cpu][load_reg].front().loc/4].pop_front();
+    requests[load_cpu][load_reg].pop_front();
+    if(unsafe_reg[load_cpu] != -1 && requests[load_cpu][unsafe_reg[load_cpu]].empty()) unsafe_reg[load_cpu] = -1;
 }
 
 // Load a new job for DRAM
 void start_job(job j) {
     curr_cmd = j.cmd;
     if(curr_cmd == "row_read") {
-        cout << "DRAM row reading initiated for row " << j.loc/1024 << " (line: " << line_to_number[j.line]+1 << ", memory-address: " << j.line*4 << ")" << "\n";
+        if(VERBROSE) cout << "DRAM row reading initiated for row " << j.loc/1024 << " (line: " << line_to_number[j.cpu][j.line]+1 << ", CPU: " << j.cpu+1 << ")" << "\n";
         curr_end = ROW_ACCESS_DELAY + tot_cycles - 1;
     } else if(curr_cmd == "row_write") {
-        cout << "DRAM row writing initiated for row " << buff_row << " (line: " << line_to_number[j.line]+1 << ", memory-address: " << j.line*4 << ")" << "\n";
+        if(VERBROSE) cout << "DRAM row writing initiated for row " << buff_row << " (line: " << line_to_number[j.cpu][j.line]+1 << ", CPU: " << j.cpu+1 << ")" << "\n";
         curr_end = ROW_ACCESS_DELAY + tot_cycles - 1;
     } else if(curr_cmd == "col_read") {
-        cout << "DRAM column reading initiated for location " << j.loc << " (line: " << line_to_number[j.line]+1 << ", memory-address: " << j.line*4 << ")" << "\n";
+        if(VERBROSE) cout << "DRAM column reading initiated for location " << j.loc << " (line: " << line_to_number[j.cpu][j.line]+1 << ", CPU: " << j.cpu+1 << ")" << "\n";
         curr_end = COL_ACCESS_DELAY + tot_cycles - 1;
     } else {
-        cout << "DRAM column writing initiated for location " << j.loc << " (line: " << line_to_number[j.line]+1 << ", memory-address: " << j.line*4 << ")" << "\n";
+        if(VERBROSE) cout << "DRAM column writing initiated for location " << j.loc << " (line: " << line_to_number[j.cpu][j.line]+1 << ", CPU: " << j.cpu+1 << ")" << "\n";
         curr_end = COL_ACCESS_DELAY + tot_cycles - 1;
     }
 }
@@ -240,26 +164,24 @@ void start_job(job j) {
 void finish_job(job j) {
     if(curr_cmd == "row_read") {
         buff_row = j.loc/1024;
-        cout << "DRAM row reading completed for row " << buff_row << " (line: " << line_to_number[j.line]+1 << ", memory-address: " << j.line*4 << ")" << "\n";
+        if(VERBROSE) cout << "DRAM row reading completed for row " << buff_row << " (line: " << line_to_number[j.cpu][j.line]+1 << ", CPU: " << j.cpu+1 << ")" << "\n";
         row_read++;
     } else if(curr_cmd == "row_write") {
-        cout << "DRAM row writing completed for row " << buff_row << " (line: " << line_to_number[j.line]+1 << ", memory-address: " << j.line*4 << ")" << "\n";
+        if(VERBROSE) cout << "DRAM row writing completed for row " << buff_row << " (line: " << line_to_number[j.cpu][j.line]+1 << ", CPU: " << j.cpu+1 << ")" << "\n";
         row_write++;
     } else if(curr_cmd == "col_read") {
         regs[j.cpu][j.reg] = mem[j.loc/4];
-        cout << "DRAM column reading completed for location " << j.loc << " (line: " << line_to_number[j.line]+1 << ", memory-address: " << j.line*4 << ")" << "\n";
-        cout << regs_name[j.reg] << " = " << regs[j.cpu][j.reg] << "\n";
+        if(VERBROSE) cout << "DRAM column reading completed for location " << j.loc << " (line: " << line_to_number[j.cpu][j.line]+1 << ", CPU: " << j.cpu+1 << ")" << "\n";
+        if(VERBROSE) cout << regs_name[j.reg] << " = " << regs[j.cpu][j.reg] << "\n";
         col_read++;
     } else {
         mem[j.loc/4] = regs[j.cpu][j.reg];
-        cout << "DRAM column writing completed for location " << j.loc << " (line: " << line_to_number[j.line]+1 << ", memory-address: " << j.line*4 << ")" << "\n";
-        cout << j.loc << "-" << j.loc+3 << ": " << mem[j.loc/4] << "\n";
+        if(VERBROSE) cout << "DRAM column writing completed for location " << j.loc << " (line: " << line_to_number[j.cpu][j.line]+1 << ", CPU: " << j.cpu+1 << ")" << "\n";
+        if(VERBROSE) cout << j.loc << "-" << j.loc+3 << ": " << mem[j.loc/4] << "\n";
         col_write++;
     }
     curr_cmd = "";
 }
-
-/**** Changes after minor finished ****/
 
 // Print various statistics
 void print_stats() {
@@ -269,9 +191,10 @@ void print_stats() {
 
     cout << "Instruction execution count\n";
     cout << "Line number : Count\n";
-    for(int i=0; i<cpus; i++){
+    for(int i = 0; i < cpus; i++) {
+        cout << "CPU: " << i+1 << "\n";
         for(int j = 0; j < line[i]; j++) {
-            cout << line_to_number[j]+1 << ":" << mp[i][j].count << "\n";
+            cout << line_to_number[i][j]+1 << ":" << mp[i][j].count << "\n";
         }
         cout << "\n";
     }
@@ -306,20 +229,22 @@ void execute_job() {
 // Create relevant jobs for reading data at loc into register $reg
 void read(int loc, int reg, int index, int curr_cpu) {
     if (!requests[curr_cpu][reg].empty()){
-        request pre=requests[curr_cpu][reg].back();
+        request pre = requests[curr_cpu][reg].back();
         if (pre.type=="lw") requests[curr_cpu][reg].pop_back();
     }
-    requests[curr_cpu][reg].push_back({"lw", reg, loc, cycles, index});
+    requests[curr_cpu][reg].push_back({"lw", reg, loc, tot_cycles, index});
+    blah[loc/4].push_back(tot_cycles);
 }
 
 // Create relevant jobs for writing data at loc from register $reg
 void write(int loc, int reg, int index, int curr_cpu) {
-    requests[curr_cpu][reg].push_back({"sw", reg, loc, cycles, index});
+    requests[curr_cpu][reg].push_back({"sw", reg, loc, tot_cycles, index});
+    blah[loc/4].push_back(tot_cycles);
 }
 
 // Execute the instruction stored at index
 void execute_ins(int index, int curr_cpu) {
-    cout << "Executing instruction on line " << line_to_number[index]+1 << " (memory location: " << index*4 << ")" << "\n";
+    if(VERBROSE) cout << "Executing instruction on line " << line_to_number[curr_cpu][index]+1 << " (memory location: " << index*4 << ") of CPU " << curr_cpu+1 << "\n";
     mp[curr_cpu][index] = {mp[curr_cpu][index].func, mp[curr_cpu][index].tag, mp[curr_cpu][index].arg1, mp[curr_cpu][index].arg2, mp[curr_cpu][index].arg3, mp[curr_cpu][index].count+1};
     string func = mp[curr_cpu][index].func;
     int arg1 = mp[curr_cpu][index].arg1;
@@ -328,52 +253,52 @@ void execute_ins(int index, int curr_cpu) {
     string tag = mp[curr_cpu][index].tag;
     if(func == "add") {
         regs[curr_cpu][arg1] = regs[curr_cpu][arg2] + regs[curr_cpu][arg3];
-        cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << "\n";
+        if(VERBROSE) cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << " (CPU " << curr_cpu+1 << ")" << "\n";
         pc[curr_cpu]++;         
     } else if(func == "sub") {
         regs[curr_cpu][arg1] = regs[curr_cpu][arg2] - regs[curr_cpu][arg3];
-        cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << "\n";
+        if(VERBROSE) cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << " (CPU " << curr_cpu+1 << ")" << "\n";
         pc[curr_cpu]++;       
     } else if(func == "mul") {
         regs[curr_cpu][arg1] = regs[curr_cpu][arg2] * regs[curr_cpu][arg3];
-        cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << "\n";
+        if(VERBROSE)  cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << " (CPU " << curr_cpu+1 << ")" << "\n";
         pc[curr_cpu]++;
     } else if(func == "beq") {
-        if(tags.find(tag) == tags.end()) {
+        if(tags[curr_cpu].find(tag) == tags[curr_cpu].end()) {
             cout << "Cannot find tag " + tag + "\n";
             exit(1);
         }
-        if (regs[curr_cpu][arg1] == regs[curr_cpu][arg2]) pc[curr_cpu] = tags[tag];
+        if (regs[curr_cpu][arg1] == regs[curr_cpu][arg2]) pc[curr_cpu] = tags[curr_cpu][tag];
         else pc[curr_cpu]++;      
     } else if(func == "bne") {
-        if(tags.find(tag) == tags.end()) {
-            cout << "Cannot find tag " + tag + "\n";
+        if(tags[curr_cpu].find(tag) == tags[curr_cpu].end()) {
+            cout << "Cannot find tag " << tag << " (CPU " << curr_cpu+1 << ")" << "\n";
             exit(1);
         }
-        if (regs[curr_cpu][arg1] != regs[curr_cpu][arg2]) pc[curr_cpu] = tags[tag];
+        if (regs[curr_cpu][arg1] != regs[curr_cpu][arg2]) pc[curr_cpu] = tags[curr_cpu][tag];
         else pc[curr_cpu]++;
     } else if(func == "slt") {
         if (regs[curr_cpu][arg2] < regs[curr_cpu][arg3]) regs[curr_cpu][arg1] = 1;
         else regs[curr_cpu][arg1] = 0;
-        cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << "\n";
+        if(VERBROSE) cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << " (CPU " << curr_cpu+1 << ")" << "\n";
         pc[curr_cpu]++;
     } else if(func == "j") {
-        if(tags.find(tag) == tags.end()) {
-            cout << "Cannot find tag " + tag + "\n";
+        if(tags[curr_cpu].find(tag) == tags[curr_cpu].end()) {
+            cout << "Cannot find tag " << tag << " (CPU " << curr_cpu+1 << ")" << "\n";
             exit(1);
         }
-        pc[curr_cpu] = tags[tag];            
+        pc[curr_cpu] = tags[curr_cpu][tag];            
     } else if(func == "lw") {
         int loc = arg2 + regs[curr_cpu][arg3];
         if(loc >= 0 && loc < line[curr_cpu]) {
-            cout << "Attempting to read instructions, Exiting\n";
+            cout << "Attempting to read instructions, Exiting" << " (CPU " << curr_cpu+1 << ")" << "\n";
             exit(1);
         } else if(loc >= (1 << 18) || loc < 0) {
-            cout << "Out of bounds memeory location\n";
+            cout << "Out of bounds memeory location" << " (CPU " << curr_cpu+1 << ")" << "\n";
             exit(1);
         }
         if(loc%4 != 0) {
-            cout << "Read location must be multiple of 4 on line " << pc+1 << "\n";
+            cout << "Read location must be multiple of 4 on line " << line_to_number[curr_cpu][pc[curr_cpu]]+1 << " (CPU " << curr_cpu+1 << ")" << "\n";
             exit(1);
         }
         read(loc, arg1, index , curr_cpu);
@@ -382,14 +307,14 @@ void execute_ins(int index, int curr_cpu) {
     } else if(func == "sw") {
         int loc = arg2 + regs[curr_cpu][arg3];
         if(loc >= 0 && loc < line[curr_cpu]) {
-            cout << "Attempting to overwrite instructions, Exiting\n";
+            cout << "Attempting to overwrite instructions, Exiting" << " (CPU " << curr_cpu+1 << ")" << "\n";
             exit(1);
         } else if(loc >= (1 << 18) || loc < 0) {
-            cout << "Out of bounds memeory location\n";
+            cout << "Out of bounds memeory location" << " (CPU " << curr_cpu+1 << ")" << "\n";
             exit(1);
         }
         if(loc%4 != 0) {
-            cout << "Write location must be multiple of 4 on line " << pc+1 << "\n";
+            cout << "Read location must be multiple of 4 on line " << line_to_number[curr_cpu][pc[curr_cpu]]+1 << " (CPU " << curr_cpu+1 << ")" << "\n";
             exit(1);
         }
         write(loc, arg1, index, curr_cpu);
@@ -397,13 +322,13 @@ void execute_ins(int index, int curr_cpu) {
         pc[curr_cpu]++;
     } else if(func == "addi") {
         regs[curr_cpu][arg1] = regs[curr_cpu][arg2] + arg3;
-        cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << "\n";
+        if(VERBROSE) cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << " (CPU " << curr_cpu+1 << ")"  << "\n";
         pc[curr_cpu]++;
     }
 }
 
 bool safe_register(int reg, int curr_cpu) {
-    if(!jobs.empty() && jobs.front().reg == reg) return false;
+    if(!jobs.empty() && jobs.front().reg == reg && jobs.front().cpu == curr_cpu) return false;
     if(requests[curr_cpu][reg].size() != 0) return false;
     return true;
 }
@@ -411,7 +336,7 @@ bool safe_register(int reg, int curr_cpu) {
 // Checks if an instruction is safe for execution
 bool is_safe(int index, int curr_cpu) {
     if(!OPTIMIZE) {
-        for(int i = 0; i < 32; i++) if(!safe_register(i,curr_cpu)) return false;
+        for(int i = 0; i < 32; i++) if(!safe_register(i, curr_cpu)) return false;
         return true;
     }
 
@@ -430,7 +355,7 @@ bool is_safe(int index, int curr_cpu) {
         unsafe_reg[curr_cpu] = arg2;
         return false;
     }
-    if(func == "addi" || func=="bne" || func=="beq") return true;
+    if(func == "addi" || func == "bne" || func == "beq") return true;
     else {
         if (!safe_register(arg3, curr_cpu)){
             unsafe_reg[curr_cpu] = arg3;
@@ -442,18 +367,20 @@ bool is_safe(int index, int curr_cpu) {
 
 // Run the program
 void run_program() {
-    while(tot_cycles<m){
+    while(tot_cycles < m) {
         tot_cycles++;
+        if(VERBROSE) cout << "Cycle: " << tot_cycles << "\n";
         if (curr_cmd != "" || !(jobs.empty() || (jobs.size() == 1 && curr_cmd == "")) || requests_pending()) execute_job();
-        for(int i=0; i<cpus; i++ ){
+        for(int i = 0; i < cpus; i++) {
             cycles[i]++;
-            cout << "Cycle: " << cycles[i] << "\n";
-            if(pc[i] != line[i] && is_safe(pc[i],i)) execute_ins(pc[i],i);
-            cout << "Register values: " << "\n";
-            for(int j = 0; j < 32; i++) {
-                cout << regs[i][j] << " ";
+            if(pc[i] != line[i] && is_safe(pc[i], i)) execute_ins(pc[i], i);
+            if(VERBROSE) {
+                cout << "Register values for CPU: " << i+1 << "\n";
+                for(int j = 0; j < 32; j++) {
+                    cout << regs[i][j] << " ";
+                }
+                cout << "\n" << "\n";
             }
-            cout << "\n" << "\n";
         }
     }
 }
@@ -466,7 +393,7 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
 
     int size = tokens.size();
     if(size < 2 || size > 4) {
-        cout << "Number of tokens in the instructions must be between two and four on line " << line_to_number[curr_cpu][line]+1 << "\n";
+        cout << "Number of tokens in the instructions must be between two and four on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
         exit(1);
     }
 
@@ -475,7 +402,7 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
     string tag = "";
     if(func == "add") {
         if(size != 4) {
-            cout << "Three arguments must be provided to add instruction on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "Three arguments must be provided to add instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
         if(name_regs.find(tokens[1]) != name_regs.end() && name_regs.find(tokens[2]) != name_regs.end() && name_regs.find(tokens[3]) != name_regs.end()) {
@@ -483,12 +410,12 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             arg2 = name_regs[tokens[2]];
             arg3 = name_regs[tokens[3]];
         } else {
-            cout << "All arguments to add must be registers on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "All arguments to add must be registers on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
     } else if(func == "sub") {
         if(size != 4) {
-            cout << "Three arguments must be provided to sub instruction on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "Three arguments must be provided to sub instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
         if(name_regs.find(tokens[1]) != name_regs.end() && name_regs.find(tokens[2]) != name_regs.end() && name_regs.find(tokens[3]) != name_regs.end()) {
@@ -496,12 +423,12 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             arg2 = name_regs[tokens[2]];
             arg3 = name_regs[tokens[3]];
         } else {
-            cout << "All arguments to sub must be registers on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "All arguments to sub must be registers on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
     } else if(func == "mul") {
         if(size != 4) {
-            cout << "Three arguments must be provided to mul instruction on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "Three arguments must be provided to mul instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
         if(name_regs.find(tokens[1]) != name_regs.end() && name_regs.find(tokens[2]) != name_regs.end() && name_regs.find(tokens[3])!=name_regs.end()) {
@@ -509,12 +436,12 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             arg2 = name_regs[tokens[2]];
             arg3 = name_regs[tokens[3]];
         } else {
-            cout << "All arguments to mul must be registers on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "All arguments to mul must be registers on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
     } else if(func == "beq") {
         if(size != 4) {
-            cout << "Three arguments must be provided to beq instruction on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "Three arguments must be provided to beq instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
         if(name_regs.find(tokens[1]) != name_regs.end() && name_regs.find(tokens[2]) != name_regs.end()) {
@@ -522,12 +449,12 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             arg2 = name_regs[tokens[2]];
             tag = tokens[3];
         } else {
-            cout << "First two arguments to beq must be registers on line and third must be memory location on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "First two arguments to beq must be registers on line and third must be memory location on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
     } else if(func == "bne") {
         if(size != 4) {
-            cout << "Three arguments must be provided to bne instruction on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "Three arguments must be provided to bne instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
         if(name_regs.find(tokens[1]) != name_regs.end() && name_regs.find(tokens[2]) != name_regs.end()) {
@@ -535,12 +462,12 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             arg2 = name_regs[tokens[2]];
             tag = tokens[3];
         } else {
-            cout << "First two arguments to bne must be registers on line and third must be memory location on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "First two arguments to bne must be registers on line and third must be memory location on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
     } else if(func == "slt") {
         if(size != 4) {
-            cout << "Three arguments must be provided to slt instruction on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "Three arguments must be provided to slt instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
         if(name_regs.find(tokens[1]) != name_regs.end() && name_regs.find(tokens[2]) != name_regs.end() && name_regs.find(tokens[3]) != name_regs.end()) {
@@ -548,19 +475,19 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             arg2 = name_regs[tokens[2]];
             arg3 = name_regs[tokens[3]];
         } else {
-            cout << "All arguments to slt must be registers on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "All arguments to slt must be registers on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }        
     } else if(func == "j") {
         if(size != 2) {
-            cout << "One argument must be provided to j instruction on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "One argument must be provided to j instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
         tag = tokens[1];
 
     } else if(func == "lw") {
         if(size != 3) {
-            cout << "Two arguments must be provided to lw instruction on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "Two arguments must be provided to lw instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
         if(name_regs.find(tokens[1]) != name_regs.end()) {
@@ -568,59 +495,59 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             int op = tokens[2].find("(");
             if(op != 0) {
                 if (!regex_match(tokens[2].substr(0,op), r2)){
-                    cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line]+1 << "\n";
+                    cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
                     exit(1);
                 }
                 try{
                     arg2 = stoi(tokens[2].substr(0,op));
                 }
                 catch(std::out_of_range& e){
-                    cout<<"Value is out of range on line "<<line_to_number[curr_cpu][line]+1<<"\n";
+                    cout << "Value is out of range on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
                     exit(1);
                 }
             } else arg2 = 0;
             if (name_regs.find(tokens[2].substr(op+1, tokens[2].size()-op-2)) == name_regs.end()){
-                cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line]+1 << "\n";
+                cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
                 exit(1);
             }
             arg3 = name_regs[tokens[2].substr(op+1, tokens[2].size()-op-2)];
         } else {
-            cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
     } else if(func == "sw") {
         if(size != 3) {
-            cout << "Two arguments must be provided to sw instruction on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "Two arguments must be provided to sw instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
         if(name_regs.find(tokens[1]) != name_regs.end()) {
             arg1 = name_regs[tokens[1]];
             int op = tokens[2].find("(");
             if(op != 0) {
-                if (!regex_match(tokens[2].substr(0,op), r2)){
-                    cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line]+1 << "\n";
+                if (!regex_match(tokens[2].substr(0,op), r2)) {
+                    cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
                     exit(1);
                 }
                 try{
                     arg2 = stoi(tokens[2].substr(0,op));
                 }
                 catch(std::out_of_range& e){
-                    cout<<"Value is out of range on line "<<line_to_number[curr_cpu][line]+1<<"\n";
+                    cout << "Value is out of range on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
                     exit(1);
                 }
             } else arg2 = 0;
             if (name_regs.find(tokens[2].substr(op+1, tokens[2].size()-op-2)) == name_regs.end()){
-                cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line]+1 << "\n";
+                cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
                 exit(1);
             }
             arg3 = name_regs[tokens[2].substr(op+1, tokens[2].size()-op-2)];
         } else {
-            cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }       
     } else if(func == "addi") {
         if(size != 4) {
-            cout << "Three arguments must be provided to addi instruction on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "Three arguments must be provided to addi instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }
         if(name_regs.find(tokens[1])!=name_regs.end() && name_regs.find(tokens[2])!=name_regs.end() && regex_match(tokens[3], r2)) {
@@ -630,15 +557,15 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
                 arg3 = stoi(tokens[3]);
             }
             catch(std::out_of_range& e){
-                cout<<"Value is out of range on line "<<line_to_number[curr_cpu][line]+1<<"\n";
+                cout << "Value is out of range on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
                 exit(1);
             }
         } else {
-            cout << "First two arguments to add must be registers on line and last must be integer on line " << line_to_number[curr_cpu][line]+1 << "\n";
+            cout << "First two arguments to add must be registers on line and last must be integer on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
             exit(1);
         }        
     } else {
-        cout << "Unrecognised function: " + func + " on line " << line_to_number[curr_cpu][line]+1 << "\n";
+        cout << "Unrecognised function: " + func + " on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
         exit(1);
     }
 
@@ -648,7 +575,7 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
 }
 
 // Read and tokenize the contents of input file
-void read_file(string file_name , int curr_cpu) {                               // remain
+void read_file(string file_name , int curr_cpu) {
     ifstream file(file_name);
     string ins;
     while(getline(file, ins)) {
@@ -657,39 +584,47 @@ void read_file(string file_name , int curr_cpu) {                               
         ins = trim(ins);
         boost::split(tokens_temp, ins, boost::is_any_of(", "));
         for(string token : tokens_temp) if(token != "") tokens.push_back(token);
-        line_to_number[curr_cpu] = line_number[curr_cpu]; // check this
+        line_to_number[curr_cpu][line[curr_cpu]] = line_number[curr_cpu];
         if(tokens.size() == 1) {
             string func = tokens[0];
             int op = func.find(":");
             if (op != -1) {
                 string tag = func.substr(0,op);
-                tags[tag] = line[curr_cpu];                       // change needed here 
+                tags[curr_cpu][tag] = line[curr_cpu];
             } else {
-                cout << "Unrecognised function: " + func + " on line " << line_to_number[curr_cpu][line]+1 << "\n";
+                cout << "Unrecognised function: " + func + " on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << "\n";
                 exit(1);
             }
         } else if(tokens.size() > 1) {
             process_instruction(tokens, curr_cpu);
             line[curr_cpu]++;
+            tot_lines++;
         }
         line_number[curr_cpu]++;
-        tot_lines++;   // includes all cpus
+    }
+}
+
+void read_all_files() {
+    for(int i = 0; i < cpus; i++) {
+        string file_name = "t" + to_string(i+1);
+        read_file(file_name, i);
     }
 }
 
 // Initialise various global variables
 void initialise() {
-    for(int i=0; i<cpus ; i++){
-        pc[i]=0;
-        line[i]=0;
-        line_number[i]=0;
-        cycles[i]=0;
-        unsafe_reg[i]=-1;
+    for(int i = 0; i < cpus; i++) {
+        pc[i] = 0;
+        line[i] = 0;
+        line_number[i] = 0;
+        cycles[i] = 0;
+        unsafe_reg[i] = -1;
         mp[i].clear();
-        for(int j=0; j < (1<<5) ; j++) regs[i][j]=0;
+        for(int j = 0; j < (1<<5); j++) regs[i][j] = 0;
     }
-    tot_cycles=0;
-    tot_lines=0;
+
+    tot_cycles = 0;
+    tot_lines = 0;
 
     curr_cmd = "";
     curr_end = -1;
@@ -703,17 +638,19 @@ void initialise() {
 }
 
 int main(int argc, char* argv[]) {
-    if(argc!=2 && argc!=4) {
-        cout << "Please execute the program as ./program <file_name> ROW_ACCESS_DELAY COLUMN_ACCESS_DELAY" << "\n"; // how will be the input?
+    if(argc != 3 && argc != 5) {
+        cout << "Please execute the program as ./program <file_name> N M ROW_ACCESS_DELAY COLUMN_ACCESS_DELAY" << "\n";
         exit(1);
     }
-    if (argc==4){
-        ROW_ACCESS_DELAY=stoi(argv[2]);
-        COL_ACCESS_DELAY=stoi(argv[3]);
+    cpus = stoi(argv[1]);
+    m = stoi(argv[2]);
+    if (argc == 5){
+        ROW_ACCESS_DELAY = stoi(argv[3]);
+        COL_ACCESS_DELAY = stoi(argv[4]);
     }
 
     initialise();
-    read_file(argv[1]);
+    read_all_files();
     run_program();
     print_stats();
 }
