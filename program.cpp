@@ -83,11 +83,11 @@ bool requests_pending() {
     return res;
 }
 
-void load_request_helper(struct request req, int type) {
-    if(type >= 3) jobs.push({"row_write", req.reg, req.loc, req.line});
-    if(type >= 2) jobs.push({"row_read", req.reg, req.loc, req.line});
-    if(req.type == "lw") jobs.push({"col_read", req.reg, req.loc, req.line});
-    else jobs.push({"col_write", req.reg, req.loc, req.line});
+void load_request_helper(struct request req, int type , int curr_cpu) {
+    if(type >= 3) jobs.push({"row_write", req.reg, req.loc, req.line, curr_cpu});
+    if(type >= 2) jobs.push({"row_read", req.reg, req.loc, req.line, curr_cpu});
+    if(req.type == "lw") jobs.push({"col_read", req.reg, req.loc, req.line, curr_cpu});
+    else jobs.push({"col_write", req.reg, req.loc, req.line, curr_cpu});
 }
 
 void load_request() {
@@ -99,7 +99,7 @@ void load_request() {
             if(requests[i][j].size() != 0 && requests[i][j].front().loc/1024 == buff_row && requests[i][j].front().req_cycle == blah[requests[i][j].front().loc/4].front()) {
                 found = true;
                 load_cpu = i;
-                load_reg = j;
+                load_reg = j;       // may be break after this
             }
         }
     }
@@ -137,7 +137,7 @@ void load_request() {
         }  
     }
 
-    load_request_helper(requests[load_cpu][load_reg].front(), type);
+    load_request_helper(requests[load_cpu][load_reg].front(), type, load_cpu);
     blah[requests[load_cpu][load_reg].front().loc/4].pop_front();
     requests[load_cpu][load_reg].pop_front();
     if(unsafe_reg[load_cpu] != -1 && requests[load_cpu][unsafe_reg[load_cpu]].empty()) unsafe_reg[load_cpu] = -1;
@@ -604,9 +604,9 @@ void read_file(string file_name , int curr_cpu) {
     }
 }
 
-void read_all_files() {
+void read_all_files(string folder) {
     for(int i = 0; i < cpus; i++) {
-        string file_name = "t" + to_string(i+1);
+        string file_name = folder+"f" + to_string(i+1);
         read_file(file_name, i);
     }
 }
@@ -638,19 +638,20 @@ void initialise() {
 }
 
 int main(int argc, char* argv[]) {
-    if(argc != 3 && argc != 5) {
-        cout << "Please execute the program as ./program <file_name> N M ROW_ACCESS_DELAY COLUMN_ACCESS_DELAY" << "\n";
+    if(argc != 4 && argc != 6) {
+        cout << "Please execute the program as ./program <folder_name> N M ROW_ACCESS_DELAY COLUMN_ACCESS_DELAY" << "\n";
         exit(1);
     }
-    cpus = stoi(argv[1]);
-    m = stoi(argv[2]);
-    if (argc == 5){
-        ROW_ACCESS_DELAY = stoi(argv[3]);
-        COL_ACCESS_DELAY = stoi(argv[4]);
+    string folder=argv[1];
+    cpus = stoi(argv[2]);
+    m = stoi(argv[3]);
+    if (argc == 6){
+        ROW_ACCESS_DELAY = stoi(argv[4]);
+        COL_ACCESS_DELAY = stoi(argv[5]);
     }
 
     initialise();
-    read_all_files();
+    read_all_files(folder);
     run_program();
     print_stats();
 }

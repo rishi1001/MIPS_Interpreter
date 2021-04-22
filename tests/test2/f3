@@ -1,0 +1,5 @@
+addi $t0, $zero, 1
+lw $t2, 1000($zero)
+addi $t1, $zero, 5
+sw $t1, 1000($zero)
+lw $t0, 1000($zero)
