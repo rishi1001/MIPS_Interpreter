@@ -7,6 +7,10 @@ int COL_ACCESS_DELAY = 2;
 const bool OPTIMIZE = true;
 const bool VERBROSE = true;
 const int MAX_CPUS = 16;
+const int MAX_MRM_SIZE = 10; // TODO: Tune this paramater
+const int REQUEST_LOADING_DELAY = MAX_MRM_SIZE / 2; // TODO: Check this function
+
+// TODO: lw-sw forwarding
 
 struct instruction {
     string func;
@@ -43,6 +47,7 @@ int regs[MAX_CPUS][1 << 5];
 int cpus, m;
 int tot_cycles;
 int tot_lines;
+int tot_instructions;
 
 int buff_row;
 int row_read, row_write, col_read, col_write;
@@ -60,8 +65,12 @@ map<int, int> line_to_number[MAX_CPUS];
 
 queue<job> jobs;
 deque<request> requests[MAX_CPUS][32];
-deque<int> blah[1 << 18];
+vector<request> all_requests;
 int unsafe_reg[MAX_CPUS];
+
+bool dram_writing_flag;
+bool dram_loading;
+int count_loading_cycles;
 
 string trim(string str, string whitespace = " \t") {
     const auto strBegin = str.find_first_not_of(whitespace);
@@ -74,13 +83,25 @@ string trim(string str, string whitespace = " \t") {
     return str.substr(strBegin, strRange);
 }
 
-bool requests_pending() {
-    bool res = false;
-    for(int i=0; i<cpus; i++){
-        for(int j = 0; j < 32; j++) if(requests[i][j].size() != 0) res = true;    // maybe return directly here
+bool is_top_request(struct request req) {
+    int min_req_cycle = tot_cycles;
+    for(request r : all_requests) {
+        if(r.loc == req.loc) min_req_cycle = min(min_req_cycle, r.req_cycle);
     }
+    return min_req_cycle == req.req_cycle;
+}
 
-    return res;
+void remove_request(struct request req) {
+    for(auto it = all_requests.begin(); it != all_requests.end(); ++it) {
+        if(it->req_cycle == req.req_cycle) {
+            all_requests.erase(it);
+            break;
+        }
+    }
+}
+
+bool requests_pending() {
+    return all_requests.size() != 0;
 }
 
 void load_request_helper(struct request req, int type , int curr_cpu) {
@@ -96,10 +117,10 @@ void load_request() {
 
     for(int i = 0; i < cpus; i++) {
         for(int j = 0; j < 32; j++) {
-            if(requests[i][j].size() != 0 && requests[i][j].front().loc/1024 == buff_row && requests[i][j].front().req_cycle == blah[requests[i][j].front().loc/4].front()) {
+            if(requests[i][j].size() != 0 && requests[i][j].front().loc/1024 == buff_row && is_top_request(requests[i][j].front())) {
                 found = true;
                 load_cpu = i;
-                load_reg = j;       // may be break after this
+                load_reg = j;
             }
         }
     }
@@ -115,7 +136,7 @@ void load_request() {
                 load_row = requests[i][unsafe_reg[i]].front().loc/1024;
                 for(int i = 0; i < cpus; i++) {
                     for(int j = 0; j < 32; j++) {
-                        if(requests[i][j].size() != 0 && requests[i][j].front().loc/1024 == load_row && requests[i][j].front().req_cycle == blah[requests[i][j].front().loc/4].front()) {
+                        if(requests[i][j].size() != 0 && requests[i][j].front().loc/1024 == load_row && is_top_request(requests[i][j].front())) {
                             found = true;
                             load_cpu = i;
                             load_reg = j;
@@ -128,7 +149,7 @@ void load_request() {
         if(!found) {
             for(int i = 0; i < cpus; i++) {
                 for(int j = 0; j < 32; j++) {
-                    if(requests[i][j].size() != 0 && requests[i][j].front().req_cycle == blah[requests[i][j].front().loc/4].front()) {
+                    if(requests[i][j].size() != 0 && is_top_request(requests[i][j].front())) {
                         load_cpu = i;
                         load_reg = j;
                     }
@@ -138,7 +159,7 @@ void load_request() {
     }
 
     load_request_helper(requests[load_cpu][load_reg].front(), type, load_cpu);
-    blah[requests[load_cpu][load_reg].front().loc/4].pop_front();
+    remove_request(requests[load_cpu][load_reg].front());
     requests[load_cpu][load_reg].pop_front();
     if(unsafe_reg[load_cpu] != -1 && requests[load_cpu][unsafe_reg[load_cpu]].empty()) unsafe_reg[load_cpu] = -1;
 }
@@ -173,6 +194,7 @@ void finish_job(job j) {
         regs[j.cpu][j.reg] = mem[j.loc/4];
         if(VERBROSE) cout << "DRAM column reading completed for location " << j.loc << " (line: " << line_to_number[j.cpu][j.line]+1 << ", CPU: " << j.cpu+1 << ")" << "\n";
         if(VERBROSE) cout << regs_name[j.reg] << " = " << regs[j.cpu][j.reg] << "\n";
+        dram_writing_flag = true;
         col_read++;
     } else {
         mem[j.loc/4] = regs[j.cpu][j.reg];
@@ -187,6 +209,7 @@ void finish_job(job j) {
 void print_stats() {
     cout << "\n";
     cout << "Total clock cycles: " << tot_cycles << "\n";
+    cout << "Total instructions executed: " << tot_instructions << "\n";
     cout << "\n";
 
     cout << "Instruction execution count\n";
@@ -217,8 +240,19 @@ void execute_job() {
         if(!jobs.empty()) {
             start_job(jobs.front());
         } else if(requests_pending()) {
-            load_request();
-            start_job(jobs.front());
+            if(dram_loading) {
+                if(count_loading_cycles == REQUEST_LOADING_DELAY) { // TODO: Calculate next request while running program
+                    count_loading_cycles = 0;
+                    dram_loading = false;
+                    load_request();
+                    start_job(jobs.front());
+                } else {
+                    count_loading_cycles++;
+                }
+            } else {
+                dram_loading = true;
+                count_loading_cycles++;
+            }
         }
     }
     if(tot_cycles == curr_end) {
@@ -228,24 +262,48 @@ void execute_job() {
 
 // Create relevant jobs for reading data at loc into register $reg
 void read(int loc, int reg, int index, int curr_cpu) {
-    if (!requests[curr_cpu][reg].empty()){
+    if(!requests[curr_cpu][reg].empty()){
         request pre = requests[curr_cpu][reg].back();
-        if (pre.type=="lw") requests[curr_cpu][reg].pop_back();
+        if(pre.type == "lw") {
+            remove_request(pre);
+            requests[curr_cpu][reg].pop_back();
+        }
     }
     requests[curr_cpu][reg].push_back({"lw", reg, loc, tot_cycles, index});
-    blah[loc/4].push_back(tot_cycles);
+    all_requests.push_back({"lw", reg, loc, tot_cycles, index});
 }
 
 // Create relevant jobs for writing data at loc from register $reg
 void write(int loc, int reg, int index, int curr_cpu) {
     requests[curr_cpu][reg].push_back({"sw", reg, loc, tot_cycles, index});
-    blah[loc/4].push_back(tot_cycles);
+
+    int max_clock_cycle = -1;
+    for(request req : all_requests) {
+        if(req.loc == loc) max_clock_cycle = max(max_clock_cycle, req.req_cycle);
+    }
+    for(auto it = all_requests.begin(); it != all_requests.end(); ++it) { // TODO: Check this
+        if(it->req_cycle == max_clock_cycle && it->type == "sw") {
+            all_requests.erase(it);
+            for(int i = 0; i < cpus; i++) { // Remove this loop
+                for(auto it1 = requests[i][it->reg].begin(); it1 != requests[i][it->reg].end(); ++it1) {
+                    if(it1->req_cycle == max_clock_cycle) {
+                        requests[i][it->reg].erase(it1);
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    all_requests.push_back({"sw", reg, loc, tot_cycles, index});
 }
 
 // Execute the instruction stored at index
 void execute_ins(int index, int curr_cpu) {
     if(VERBROSE) cout << "Executing instruction on line " << line_to_number[curr_cpu][index]+1 << " (memory location: " << index*4 << ") of CPU " << curr_cpu+1 << "\n";
     mp[curr_cpu][index] = {mp[curr_cpu][index].func, mp[curr_cpu][index].tag, mp[curr_cpu][index].arg1, mp[curr_cpu][index].arg2, mp[curr_cpu][index].arg3, mp[curr_cpu][index].count+1};
+    tot_instructions++;
     string func = mp[curr_cpu][index].func;
     int arg1 = mp[curr_cpu][index].arg1;
     int arg2 = mp[curr_cpu][index].arg2;
@@ -345,13 +403,20 @@ bool is_safe(int index, int curr_cpu) {
     int arg2 = mp[curr_cpu][index].arg2;
     int arg3 = mp[curr_cpu][index].arg3;
 
-    if(func == "lw" || func == "sw") return true;
+    if(func == "add" || func == "sub" || func == "mul" || func == "slt" || func == "addi") {
+        if(dram_writing_flag) return false;
+    }
+
+    if(func == "lw" || func == "sw") { // TODO: Move this check to read/write
+        if(all_requests.size() == MAX_MRM_SIZE) return false;
+        else return true;
+    }
     if(func == "j") return true;
-    if (!safe_register(arg1, curr_cpu)){
+    if(!safe_register(arg1, curr_cpu)){
         unsafe_reg[curr_cpu] = arg1;
         return false;
     }
-    if (!safe_register(arg2, curr_cpu)){
+    if(!safe_register(arg2, curr_cpu)) {
         unsafe_reg[curr_cpu] = arg2;
         return false;
     }
@@ -368,6 +433,7 @@ bool is_safe(int index, int curr_cpu) {
 // Run the program
 void run_program() {
     while(tot_cycles < m) {
+        if(dram_writing_flag) dram_writing_flag = false;
         tot_cycles++;
         if(VERBROSE) cout << "Cycle: " << tot_cycles << "\n";
         if (curr_cmd != "" || !(jobs.empty() || (jobs.size() == 1 && curr_cmd == "")) || requests_pending()) execute_job();
@@ -623,8 +689,13 @@ void initialise() {
         for(int j = 0; j < (1<<5); j++) regs[i][j] = 0;
     }
 
+    dram_writing_flag = false;
+    dram_loading = true;
+    count_loading_cycles = REQUEST_LOADING_DELAY;
+
     tot_cycles = 0;
     tot_lines = 0;
+    tot_instructions = 0;
 
     curr_cmd = "";
     curr_end = -1;
