@@ -240,18 +240,17 @@ void execute_job() {
         if(!jobs.empty()) {
             start_job(jobs.front());
         } else if(requests_pending()) {
+            //cout<<dram_loading<<" "<<count_loading_cycles<<"\n";   // So now after column writing it still waits to select next job to perform(do we need to change this)
+            if (count_loading_cycles==REQUEST_LOADING_DELAY){
+                dram_loading=true;
+            }
             if(dram_loading) {
-                if(count_loading_cycles == REQUEST_LOADING_DELAY) { // TODO: Calculate next request while running program
-                    count_loading_cycles = 0;
-                    dram_loading = false;
-                    load_request();
-                    start_job(jobs.front());
-                } else {
-                    count_loading_cycles++;
-                }
+                load_request();
+                start_job(jobs.front());
+                count_loading_cycles = 0;
+                dram_loading = false;
             } else {
-                dram_loading = true;
-                count_loading_cycles++;
+                cout<<"Still selecting which job to perform"<<"\n";
             }
         }
     }
@@ -407,10 +406,32 @@ bool is_safe(int index, int curr_cpu) {
         if(dram_writing_flag) return false;
     }
 
-    if(func == "lw" || func == "sw") { // TODO: Move this check to read/write
+    if (func=="lw"){
+        if(!requests[curr_cpu][arg1].empty()){
+            request pre = requests[curr_cpu][arg1].back();
+            if(pre.type == "lw") {
+                return true;
+            }
+        }
         if(all_requests.size() == MAX_MRM_SIZE) return false;
         else return true;
     }
+
+    if (func=="sw"){
+        int loc = arg2 + regs[curr_cpu][arg3];
+        int max_clock_cycle = -1;
+        for(request req : all_requests) {
+            if(req.loc == loc) max_clock_cycle = max(max_clock_cycle, req.req_cycle);
+        }
+        for(auto it = all_requests.begin(); it != all_requests.end(); ++it) { 
+            if(it->req_cycle == max_clock_cycle && it->type == "sw") {
+                return true;
+            }
+        }
+        if(all_requests.size() == MAX_MRM_SIZE) return false;
+        else return true;            
+    }
+    
     if(func == "j") return true;
     if(!safe_register(arg1, curr_cpu)){
         unsafe_reg[curr_cpu] = arg1;
@@ -435,6 +456,7 @@ void run_program() {
     while(tot_cycles < m) {
         if(dram_writing_flag) dram_writing_flag = false;
         tot_cycles++;
+        count_loading_cycles=min(count_loading_cycles+1,REQUEST_LOADING_DELAY);
         if(VERBROSE) cout << "Cycle: " << tot_cycles << "\n";
         if (curr_cmd != "" || !(jobs.empty() || (jobs.size() == 1 && curr_cmd == "")) || requests_pending()) execute_job();
         for(int i = 0; i < cpus; i++) {
