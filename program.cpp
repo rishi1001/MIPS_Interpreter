@@ -9,8 +9,15 @@ const bool VERBROSE = true;
 const int MAX_CPUS = 16;
 const int MAX_MRM_SIZE = 10; // TODO: Tune this paramater
 const int REQUEST_LOADING_DELAY = MAX_MRM_SIZE / 2; // TODO: Check this function
+// TODO: This delay depends on number of pending cycles.
+// TODO: Wait period to select request,cycle increases when we encounter lw or sw.
 
 // TODO: lw-sw forwarding
+// TODO: Check the previous sw request in the queue(and in the jobs) for the same location and forward that register's value to this register.
+// ?? forwaring only in lw sw? why not if "sub" or "add" type statement came(unsafe) and the register's lw request is in the queue.
+
+// TODO:  sw $t0, 1000
+// TODO:  lw $t0, 1000
 
 struct instruction {
     string func;
@@ -240,7 +247,7 @@ void execute_job() {
         if(!jobs.empty()) {
             start_job(jobs.front());
         } else if(requests_pending()) {
-            //cout<<dram_loading<<" "<<count_loading_cycles<<"\n";   // So now after column writing it still waits to select next job to perform(do we need to change this)
+            //cout<<dram_loading<<" "<<count_loading_cycles<<"\n";  
             if (count_loading_cycles==REQUEST_LOADING_DELAY){
                 dram_loading=true;
             }
@@ -280,10 +287,10 @@ void write(int loc, int reg, int index, int curr_cpu) {
     for(request req : all_requests) {
         if(req.loc == loc) max_clock_cycle = max(max_clock_cycle, req.req_cycle);
     }
-    for(auto it = all_requests.begin(); it != all_requests.end(); ++it) { // TODO: Check this
+    for(auto it = all_requests.begin(); it != all_requests.end(); ++it) { 
         if(it->req_cycle == max_clock_cycle && it->type == "sw") {
             all_requests.erase(it);
-            for(int i = 0; i < cpus; i++) { // Remove this loop
+            for(int i = 0; i < cpus; i++) { 
                 for(auto it1 = requests[i][it->reg].begin(); it1 != requests[i][it->reg].end(); ++it1) {
                     if(it1->req_cycle == max_clock_cycle) {
                         requests[i][it->reg].erase(it1);
