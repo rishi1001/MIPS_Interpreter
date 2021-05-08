@@ -8,9 +8,7 @@ const bool OPTIMIZE = true;
 const bool VERBROSE = true;
 const int MAX_CPUS = 16;
 const int MAX_MRM_SIZE = 10; // TODO: Tune this paramater
-const int REQUEST_LOADING_DELAY = MAX_MRM_SIZE / 2; // TODO: Check this function
-// TODO: This delay depends on number of pending cycles.
-// TODO: Wait period to select request,cycle increases when we encounter lw or sw.
+const int REQUEST_LOADING_DELAY = MAX_MRM_SIZE / 2; 
 
 // TODO: lw-sw forwarding
 // TODO: Check the previous sw request in the queue(and in the jobs) for the same location and forward that register's value to this register.
@@ -78,6 +76,11 @@ int unsafe_reg[MAX_CPUS];
 bool dram_writing_flag;
 bool dram_loading;
 int count_loading_cycles;
+
+// TODO: Check this function
+int get_request_loading_delay() {
+    return all_requests.size() / 2;
+}
 
 string trim(string str, string whitespace = " \t") {
     const auto strBegin = str.find_first_not_of(whitespace);
@@ -247,9 +250,8 @@ void execute_job() {
         if(!jobs.empty()) {
             start_job(jobs.front());
         } else if(requests_pending()) {
-            //cout<<dram_loading<<" "<<count_loading_cycles<<"\n";  
-            if (count_loading_cycles==REQUEST_LOADING_DELAY){
-                dram_loading=true;
+            if(count_loading_cycles >= get_request_loading_delay()) {
+                dram_loading = true;
             }
             if(dram_loading) {
                 load_request();
@@ -257,7 +259,7 @@ void execute_job() {
                 count_loading_cycles = 0;
                 dram_loading = false;
             } else {
-                cout<<"Still selecting which job to perform"<<"\n";
+                cout << "Still selecting which job to perform" << "\n";
             }
         }
     }
@@ -420,7 +422,7 @@ bool is_safe(int index, int curr_cpu) {
                 return true;
             }
         }
-        if(all_requests.size() == MAX_MRM_SIZE) return false;
+        if(all_requests.size() >= MAX_MRM_SIZE) return false;
         else return true;
     }
 
@@ -435,7 +437,7 @@ bool is_safe(int index, int curr_cpu) {
                 return true;
             }
         }
-        if(all_requests.size() == MAX_MRM_SIZE) return false;
+        if(all_requests.size() >= MAX_MRM_SIZE) return false;
         else return true;            
     }
     
@@ -463,7 +465,7 @@ void run_program() {
     while(tot_cycles < m) {
         if(dram_writing_flag) dram_writing_flag = false;
         tot_cycles++;
-        count_loading_cycles=min(count_loading_cycles+1,REQUEST_LOADING_DELAY);
+        count_loading_cycles++;
         if(VERBROSE) cout << "Cycle: " << tot_cycles << "\n";
         if (curr_cmd != "" || !(jobs.empty() || (jobs.size() == 1 && curr_cmd == "")) || requests_pending()) execute_job();
         for(int i = 0; i < cpus; i++) {
@@ -719,7 +721,7 @@ void initialise() {
     }
 
     dram_writing_flag = false;
-    dram_loading = true;
+    dram_loading = false;
     count_loading_cycles = REQUEST_LOADING_DELAY;
 
     tot_cycles = 0;
