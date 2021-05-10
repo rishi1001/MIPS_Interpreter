@@ -8,9 +8,7 @@ const bool OPTIMIZE = true;
 const bool VERBROSE = true;
 const int MAX_CPUS = 16;
 const int MAX_MRM_SIZE = 10; // TODO: Tune this paramater
-const int REQUEST_LOADING_DELAY = MAX_MRM_SIZE / 2; 
-
-// TODO: forwaring only in lw sw? why not if "sub" or "add" type statement came(unsafe) and the register's lw request is in the queue.
+const int REQUEST_LOADING_DELAY = MAX_MRM_SIZE / 2;
 
 struct instruction {
     string func;
@@ -43,12 +41,16 @@ int pc[MAX_CPUS];
 int line[MAX_CPUS];
 int line_number[MAX_CPUS];
 int cycles[MAX_CPUS];
+bool valid[MAX_CPUS];
+int offset[MAX_CPUS];
 int mem[1 << 18];
 int regs[MAX_CPUS][1 << 5];
 int cpus, m;
 int tot_cycles;
 int tot_lines;
 int tot_instructions;
+
+int block_size;
 
 int buff_row;
 int row_read, row_write, col_read, col_write;
@@ -72,6 +74,7 @@ int unsafe_reg[MAX_CPUS];
 bool dram_writing_flag;
 bool dram_loading;
 int count_loading_cycles;
+bool buffer_bottleneck;
 
 // TODO: Check this function
 int get_request_loading_delay() {
@@ -324,8 +327,6 @@ void read(int loc, int reg, int index, int curr_cpu) {
 
 // Create relevant jobs for writing data at loc from register $reg
 void write(int loc, int reg, int index, int curr_cpu) {
-    requests[curr_cpu][reg].push_back({"sw", reg, loc, tot_cycles, index});
-
     int max_clock_cycle = -1;
     for(request req : all_requests) {
         if(req.loc == loc) max_clock_cycle = max(max_clock_cycle, req.req_cycle);
@@ -345,6 +346,7 @@ void write(int loc, int reg, int index, int curr_cpu) {
         }
     }
 
+    requests[curr_cpu][reg].push_back({"sw", reg, loc, tot_cycles, index});
     all_requests.push_back({"sw", reg, loc, tot_cycles, index, curr_cpu});
 }
 
@@ -375,7 +377,8 @@ void execute_ins(int index, int curr_cpu) {
     } else if(func == "beq") {
         if(tags[curr_cpu].find(tag) == tags[curr_cpu].end()) {
             cout << "Cannot find tag " + tag + "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         if (regs[curr_cpu][arg1] == regs[curr_cpu][arg2]) pc[curr_cpu] = tags[curr_cpu][tag];
         else pc[curr_cpu]++; 
@@ -383,7 +386,8 @@ void execute_ins(int index, int curr_cpu) {
     } else if(func == "bne") {
         if(tags[curr_cpu].find(tag) == tags[curr_cpu].end()) {
             cout << "Cannot find tag " << tag << " (CPU " << curr_cpu+1 << ")" << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         if (regs[curr_cpu][arg1] != regs[curr_cpu][arg2]) pc[curr_cpu] = tags[curr_cpu][tag];
         else pc[curr_cpu]++;
@@ -397,40 +401,41 @@ void execute_ins(int index, int curr_cpu) {
     } else if(func == "j") {
         if(tags[curr_cpu].find(tag) == tags[curr_cpu].end()) {
             cout << "Cannot find tag " << tag << " (CPU " << curr_cpu+1 << ")" << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         pc[curr_cpu] = tags[curr_cpu][tag];
         tot_instructions++;       
     } else if(func == "lw") {
         int loc = arg2 + regs[curr_cpu][arg3];
-        if(loc >= 0 && loc < line[curr_cpu]) {
-            cout << "Attempting to read instructions, Exiting" << " (CPU " << curr_cpu+1 << ")" << "\n";
-            exit(1);
-        } else if(loc >= (1 << 18) || loc < 0) {
+        if(loc >= block_size || loc < 0) {
             cout << "Out of bounds memeory location" << " (CPU " << curr_cpu+1 << ")" << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         if(loc%4 != 0) {
             cout << "Read location must be multiple of 4 on line " << line_to_number[curr_cpu][pc[curr_cpu]]+1 << " (CPU " << curr_cpu+1 << ")" << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
-        read(loc, arg1, index , curr_cpu);
+        read(loc+offset[curr_cpu], arg1, index , curr_cpu);
+        buffer_bottleneck = true;
         // regs[arg1] = mem[loc/4];
         pc[curr_cpu]++;
     } else if(func == "sw") {
         int loc = arg2 + regs[curr_cpu][arg3];
-        if(loc >= 0 && loc < line[curr_cpu]) {
-            cout << "Attempting to overwrite instructions, Exiting" << " (CPU " << curr_cpu+1 << ")" << "\n";
-            exit(1);
-        } else if(loc >= (1 << 18) || loc < 0) {
+        if(loc >= block_size || loc < 0) {
             cout << "Out of bounds memeory location" << " (CPU " << curr_cpu+1 << ")" << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         if(loc%4 != 0) {
             cout << "Read location must be multiple of 4 on line " << line_to_number[curr_cpu][pc[curr_cpu]]+1 << " (CPU " << curr_cpu+1 << ")" << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
-        write(loc, arg1, index, curr_cpu);
+        write(loc+offset[curr_cpu], arg1, index, curr_cpu);
+        buffer_bottleneck = true;
         // mem[loc/4] = regs[arg1];
         pc[curr_cpu]++;
     } else if(func == "addi") {
@@ -444,6 +449,13 @@ void execute_ins(int index, int curr_cpu) {
 bool safe_register(int reg, int curr_cpu) {
     if(!jobs.empty() && jobs.front().reg == reg && jobs.front().cpu == curr_cpu) return false;
     if(requests[curr_cpu][reg].size() != 0) return false;
+    return true;
+}
+
+bool safe_register1(int reg, int curr_cpu) {
+    for(auto it = all_requests.begin(); it != all_requests.end(); it++) {
+        if(it->cpu == curr_cpu && it->reg == reg && it->type == "lw") return false;
+    }
     return true;
 }
 
@@ -463,7 +475,7 @@ bool is_safe(int index, int curr_cpu) {
         if(dram_writing_flag) return false;
     }
 
-    if (func=="lw"){
+    if (func == "lw"){
         if(!requests[curr_cpu][arg1].empty()){
             request pre = requests[curr_cpu][arg1].back();
             if(pre.type == "lw") {
@@ -494,13 +506,13 @@ bool is_safe(int index, int curr_cpu) {
         unsafe_reg[curr_cpu] = arg1;
         return false;
     }
-    if(!safe_register(arg2, curr_cpu)) {
+    if(!safe_register1(arg2, curr_cpu)) {
         unsafe_reg[curr_cpu] = arg2;
         return false;
     }
     if(func == "addi" || func == "bne" || func == "beq") return true;
     else {
-        if (!safe_register(arg3, curr_cpu)){
+        if (!safe_register1(arg3, curr_cpu)){
             unsafe_reg[curr_cpu] = arg3;
             return false;
         }
@@ -512,13 +524,15 @@ bool is_safe(int index, int curr_cpu) {
 void run_program() {
     while(tot_cycles < m) {
         if(dram_writing_flag) dram_writing_flag = false;
+        if(buffer_bottleneck) buffer_bottleneck = false;
         tot_cycles++;
         count_loading_cycles++;
         if(VERBROSE) cout << "Cycle: " << tot_cycles << "\n";
-        if (curr_cmd != "" || !(jobs.empty() || (jobs.size() == 1 && curr_cmd == "")) || requests_pending()) execute_job();
+        execute_job();
         for(int i = 0; i < cpus; i++) {
+            if(!valid[i]) continue;
             cycles[i]++;
-            if(pc[i] != line[i] && is_safe(pc[i], i)) execute_ins(pc[i], i);
+            if(pc[i] != line[i] && is_safe(pc[i], i) && !buffer_bottleneck) execute_ins(pc[i], i);
             if(VERBROSE) {
                 cout << "Register values for CPU: " << i+1 << "\n";
                 for(int j = 0; j < 32; j++) {
@@ -539,7 +553,8 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
     int size = tokens.size();
     if(size < 2 || size > 4) {
         cout << "Number of tokens in the instructions must be between two and four on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-        exit(1);
+        valid[curr_cpu] = false;
+        return;
     }
 
     string func = tokens[0];
@@ -548,7 +563,8 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
     if(func == "add") {
         if(size != 4) {
             cout << "Three arguments must be provided to add instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         if(name_regs.find(tokens[1]) != name_regs.end() && name_regs.find(tokens[2]) != name_regs.end() && name_regs.find(tokens[3]) != name_regs.end()) {
             arg1 = name_regs[tokens[1]];
@@ -556,12 +572,14 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             arg3 = name_regs[tokens[3]];
         } else {
             cout << "All arguments to add must be registers on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
     } else if(func == "sub") {
         if(size != 4) {
             cout << "Three arguments must be provided to sub instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         if(name_regs.find(tokens[1]) != name_regs.end() && name_regs.find(tokens[2]) != name_regs.end() && name_regs.find(tokens[3]) != name_regs.end()) {
             arg1 = name_regs[tokens[1]];
@@ -569,12 +587,14 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             arg3 = name_regs[tokens[3]];
         } else {
             cout << "All arguments to sub must be registers on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
     } else if(func == "mul") {
         if(size != 4) {
             cout << "Three arguments must be provided to mul instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         if(name_regs.find(tokens[1]) != name_regs.end() && name_regs.find(tokens[2]) != name_regs.end() && name_regs.find(tokens[3])!=name_regs.end()) {
             arg1 = name_regs[tokens[1]];
@@ -582,12 +602,14 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             arg3 = name_regs[tokens[3]];
         } else {
             cout << "All arguments to mul must be registers on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
     } else if(func == "beq") {
         if(size != 4) {
             cout << "Three arguments must be provided to beq instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         if(name_regs.find(tokens[1]) != name_regs.end() && name_regs.find(tokens[2]) != name_regs.end()) {
             arg1 = name_regs[tokens[1]];
@@ -595,12 +617,14 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             tag = tokens[3];
         } else {
             cout << "First two arguments to beq must be registers on line and third must be memory location on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
     } else if(func == "bne") {
         if(size != 4) {
             cout << "Three arguments must be provided to bne instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         if(name_regs.find(tokens[1]) != name_regs.end() && name_regs.find(tokens[2]) != name_regs.end()) {
             arg1 = name_regs[tokens[1]];
@@ -608,12 +632,14 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             tag = tokens[3];
         } else {
             cout << "First two arguments to bne must be registers on line and third must be memory location on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
     } else if(func == "slt") {
         if(size != 4) {
             cout << "Three arguments must be provided to slt instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         if(name_regs.find(tokens[1]) != name_regs.end() && name_regs.find(tokens[2]) != name_regs.end() && name_regs.find(tokens[3]) != name_regs.end()) {
             arg1 = name_regs[tokens[1]];
@@ -621,19 +647,22 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             arg3 = name_regs[tokens[3]];
         } else {
             cout << "All arguments to slt must be registers on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }        
     } else if(func == "j") {
         if(size != 2) {
             cout << "One argument must be provided to j instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         tag = tokens[1];
 
     } else if(func == "lw") {
         if(size != 3) {
             cout << "Two arguments must be provided to lw instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         if(name_regs.find(tokens[1]) != name_regs.end()) {
             arg1 = name_regs[tokens[1]];
@@ -641,29 +670,34 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             if(op != 0) {
                 if (!regex_match(tokens[2].substr(0,op), r2)){
                     cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-                    exit(1);
+                    valid[curr_cpu] = false;
+                    return;
                 }
                 try{
                     arg2 = stoi(tokens[2].substr(0,op));
                 }
                 catch(std::out_of_range& e){
                     cout << "Value is out of range on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-                    exit(1);
+                    valid[curr_cpu] = false;
+                    return;
                 }
             } else arg2 = 0;
             if (name_regs.find(tokens[2].substr(op+1, tokens[2].size()-op-2)) == name_regs.end()){
                 cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-                exit(1);
+                valid[curr_cpu] = false;
+                return;
             }
             arg3 = name_regs[tokens[2].substr(op+1, tokens[2].size()-op-2)];
         } else {
             cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
     } else if(func == "sw") {
         if(size != 3) {
             cout << "Two arguments must be provided to sw instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         if(name_regs.find(tokens[1]) != name_regs.end()) {
             arg1 = name_regs[tokens[1]];
@@ -671,29 +705,34 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             if(op != 0) {
                 if (!regex_match(tokens[2].substr(0,op), r2)) {
                     cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-                    exit(1);
+                    valid[curr_cpu] = false;
+                    return;
                 }
                 try{
                     arg2 = stoi(tokens[2].substr(0,op));
                 }
                 catch(std::out_of_range& e){
                     cout << "Value is out of range on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-                    exit(1);
+                    valid[curr_cpu] = false;
+                    return;
                 }
             } else arg2 = 0;
             if (name_regs.find(tokens[2].substr(op+1, tokens[2].size()-op-2)) == name_regs.end()){
                 cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-                exit(1);
+                valid[curr_cpu] = false;
+                return;
             }
             arg3 = name_regs[tokens[2].substr(op+1, tokens[2].size()-op-2)];
         } else {
             cout << "First argument must be register and second must be memory on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }       
     } else if(func == "addi") {
         if(size != 4) {
             cout << "Three arguments must be provided to addi instruction on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }
         if(name_regs.find(tokens[1])!=name_regs.end() && name_regs.find(tokens[2])!=name_regs.end() && regex_match(tokens[3], r2)) {
             arg1 = name_regs[tokens[1]];
@@ -703,15 +742,18 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
             }
             catch(std::out_of_range& e){
                 cout << "Value is out of range on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-                exit(1);
+                valid[curr_cpu] = false;
+                return;
             }
         } else {
             cout << "First two arguments to add must be registers on line and last must be integer on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-            exit(1);
+            valid[curr_cpu] = false;
+            return;
         }        
     } else {
         cout << "Unrecognised function: " + func + " on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << " of CPU " << curr_cpu+1 << "\n";
-        exit(1);
+        valid[curr_cpu] = false;
+        return;
     }
 
     instruction ins = {func, tag, arg1, arg2, arg3, count};
@@ -724,6 +766,7 @@ void read_file(string file_name , int curr_cpu) {
     ifstream file(file_name);
     string ins;
     while(getline(file, ins)) {
+        if(!valid[curr_cpu]) return;
         vector<string> tokens;
         vector<string> tokens_temp;
         ins = trim(ins);
@@ -738,7 +781,8 @@ void read_file(string file_name , int curr_cpu) {
                 tags[curr_cpu][tag] = line[curr_cpu];
             } else {
                 cout << "Unrecognised function: " + func + " on line " << line_to_number[curr_cpu][line[curr_cpu]]+1 << "\n";
-                exit(1);
+                valid[curr_cpu] = false;
+                return;
             }
         } else if(tokens.size() > 1) {
             process_instruction(tokens, curr_cpu);
@@ -765,12 +809,16 @@ void initialise() {
         cycles[i] = 0;
         unsafe_reg[i] = -1;
         mp[i].clear();
+        valid[i] = true;
+        offset[i] = i*block_size;
         for(int j = 0; j < (1<<5); j++) regs[i][j] = 0;
     }
 
     dram_writing_flag = false;
     dram_loading = false;
     count_loading_cycles = REQUEST_LOADING_DELAY;
+
+    buffer_bottleneck = false;
 
     tot_cycles = 0;
     tot_lines = 0;
@@ -792,13 +840,16 @@ int main(int argc, char* argv[]) {
         cout << "Please execute the program as ./program <folder_name> N M ROW_ACCESS_DELAY COLUMN_ACCESS_DELAY" << "\n";
         exit(1);
     }
-    string folder=argv[1];
+    string folder = argv[1];
     cpus = stoi(argv[2]);
     m = stoi(argv[3]);
-    if (argc == 6){
+    if(argc == 6) {
         ROW_ACCESS_DELAY = stoi(argv[4]);
         COL_ACCESS_DELAY = stoi(argv[5]);
     }
+
+    block_size = (1 << 20) / cpus;
+    while(block_size%4 != 0) block_size++;
 
     initialise();
     read_all_files(folder);
