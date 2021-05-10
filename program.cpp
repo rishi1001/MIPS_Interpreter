@@ -10,12 +10,7 @@ const int MAX_CPUS = 16;
 const int MAX_MRM_SIZE = 10; // TODO: Tune this paramater
 const int REQUEST_LOADING_DELAY = MAX_MRM_SIZE / 2; 
 
-// TODO: lw-sw forwarding
-// TODO: Check the previous sw request in the queue(and in the jobs) for the same location and forward that register's value to this register.
-// ?? forwaring only in lw sw? why not if "sub" or "add" type statement came(unsafe) and the register's lw request is in the queue.
-
-// TODO:  sw $t0, 1000
-// TODO:  lw $t0, 1000
+// TODO: forwaring only in lw sw? why not if "sub" or "add" type statement came(unsafe) and the register's lw request is in the queue.
 
 struct instruction {
     string func;
@@ -32,6 +27,7 @@ struct request {
     int loc;
     int req_cycle;
     int line;
+    int cpu;
 };
 
 struct job {
@@ -115,6 +111,13 @@ bool requests_pending() {
 }
 
 void load_request_helper(struct request req, int type , int curr_cpu) {
+    if(req.type == "forward") {
+        regs[req.cpu][req.reg] = mem[req.loc/4];
+        if(VERBROSE) cout << "DRAM request forwarded" << " (line: " << line_to_number[req.cpu][req.line]+1 << ", CPU: " << req.cpu+1 << ")" << "\n";
+        if(VERBROSE) cout << regs_name[req.reg] << " = " << regs[req.cpu][req.reg] << "\n";
+        return;
+    }
+
     if(type >= 3) jobs.push({"row_write", req.reg, req.loc, req.line, curr_cpu});
     if(type >= 2) jobs.push({"row_read", req.reg, req.loc, req.line, curr_cpu});
     if(req.type == "lw") jobs.push({"col_read", req.reg, req.loc, req.line, curr_cpu});
@@ -255,7 +258,7 @@ void execute_job() {
             }
             if(dram_loading) {
                 load_request();
-                start_job(jobs.front());
+                if(!jobs.empty()) start_job(jobs.front());
                 count_loading_cycles = 0;
                 dram_loading = false;
             } else {
@@ -270,6 +273,39 @@ void execute_job() {
 
 // Create relevant jobs for reading data at loc into register $reg
 void read(int loc, int reg, int index, int curr_cpu) {
+    // Checking for possile forwarding
+    bool found = false;
+    int max_cycle = -1;
+    int max_reg = -1;
+    for(auto it = all_requests.begin(); it != all_requests.end(); it++) {
+        if(it->loc == loc && it->cpu == curr_cpu) {
+            if(it->req_cycle > max_cycle) {
+                if(it->type == "sw") {
+                    found = true;
+                    max_cycle = it->req_cycle;
+                    max_reg = it->reg;
+                }
+            }
+        }
+    }
+
+    if(!jobs.empty()) {
+        if(jobs.back().cpu == curr_cpu && jobs.back().loc == loc && jobs.back().cmd == "col_write") {
+            found = true;
+            max_reg = jobs.back().reg;
+        }
+    }
+
+    if(found) {
+        if(max_reg == reg) {
+            cout << "Current instruction is ignored due to redundancy\n";
+            return;
+        }
+        requests[curr_cpu][reg].push_back({"forward", reg, loc, tot_cycles, index});
+        all_requests.push_back({"forward", reg, loc, tot_cycles, index, curr_cpu});
+        return;
+    }
+
     if(!requests[curr_cpu][reg].empty()){
         request pre = requests[curr_cpu][reg].back();
         if(pre.type == "lw") {
@@ -278,7 +314,7 @@ void read(int loc, int reg, int index, int curr_cpu) {
         }
     }
     requests[curr_cpu][reg].push_back({"lw", reg, loc, tot_cycles, index});
-    all_requests.push_back({"lw", reg, loc, tot_cycles, index});
+    all_requests.push_back({"lw", reg, loc, tot_cycles, index, curr_cpu});
 }
 
 // Create relevant jobs for writing data at loc from register $reg
@@ -290,7 +326,7 @@ void write(int loc, int reg, int index, int curr_cpu) {
         if(req.loc == loc) max_clock_cycle = max(max_clock_cycle, req.req_cycle);
     }
     for(auto it = all_requests.begin(); it != all_requests.end(); ++it) { 
-        if(it->req_cycle == max_clock_cycle && it->type == "sw") {
+        if(it->req_cycle == max_clock_cycle && it->type == "sw" && it->cpu == curr_cpu) {
             all_requests.erase(it);
             for(int i = 0; i < cpus; i++) { 
                 for(auto it1 = requests[i][it->reg].begin(); it1 != requests[i][it->reg].end(); ++it1) {
@@ -304,7 +340,7 @@ void write(int loc, int reg, int index, int curr_cpu) {
         }
     }
 
-    all_requests.push_back({"sw", reg, loc, tot_cycles, index});
+    all_requests.push_back({"sw", reg, loc, tot_cycles, index, curr_cpu});
 }
 
 // Execute the instruction stored at index
