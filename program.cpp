@@ -115,6 +115,8 @@ void load_request_helper(struct request req, int type , int curr_cpu) {
         regs[req.cpu][req.reg] = mem[req.loc/4];
         if(VERBROSE) cout << "DRAM request forwarded" << " (line: " << line_to_number[req.cpu][req.line]+1 << ", CPU: " << req.cpu+1 << ")" << "\n";
         if(VERBROSE) cout << regs_name[req.reg] << " = " << regs[req.cpu][req.reg] << "\n";
+        dram_writing_flag = true;
+        tot_instructions++;
         return;
     }
 
@@ -209,11 +211,13 @@ void finish_job(job j) {
         if(VERBROSE) cout << regs_name[j.reg] << " = " << regs[j.cpu][j.reg] << "\n";
         dram_writing_flag = true;
         col_read++;
+        tot_instructions++;
     } else {
         mem[j.loc/4] = regs[j.cpu][j.reg];
         if(VERBROSE) cout << "DRAM column writing completed for location " << j.loc << " (line: " << line_to_number[j.cpu][j.line]+1 << ", CPU: " << j.cpu+1 << ")" << "\n";
         if(VERBROSE) cout << j.loc << "-" << j.loc+3 << ": " << mem[j.loc/4] << "\n";
         col_write++;
+        tot_instructions++;
     }
     curr_cmd = "";
 }
@@ -299,6 +303,7 @@ void read(int loc, int reg, int index, int curr_cpu) {
     if(found) {
         if(max_reg == reg) {
             cout << "Current instruction is ignored due to redundancy\n";
+            tot_instructions++;
             return;
         }
         requests[curr_cpu][reg].push_back({"forward", reg, loc, tot_cycles, index});
@@ -347,7 +352,6 @@ void write(int loc, int reg, int index, int curr_cpu) {
 void execute_ins(int index, int curr_cpu) {
     if(VERBROSE) cout << "Executing instruction on line " << line_to_number[curr_cpu][index]+1 << " (memory location: " << index*4 << ") of CPU " << curr_cpu+1 << "\n";
     mp[curr_cpu][index] = {mp[curr_cpu][index].func, mp[curr_cpu][index].tag, mp[curr_cpu][index].arg1, mp[curr_cpu][index].arg2, mp[curr_cpu][index].arg3, mp[curr_cpu][index].count+1};
-    tot_instructions++;
     string func = mp[curr_cpu][index].func;
     int arg1 = mp[curr_cpu][index].arg1;
     int arg2 = mp[curr_cpu][index].arg2;
@@ -356,22 +360,26 @@ void execute_ins(int index, int curr_cpu) {
     if(func == "add") {
         regs[curr_cpu][arg1] = regs[curr_cpu][arg2] + regs[curr_cpu][arg3];
         if(VERBROSE) cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << " (CPU " << curr_cpu+1 << ")" << "\n";
-        pc[curr_cpu]++;         
+        pc[curr_cpu]++; 
+        tot_instructions++;        
     } else if(func == "sub") {
         regs[curr_cpu][arg1] = regs[curr_cpu][arg2] - regs[curr_cpu][arg3];
         if(VERBROSE) cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << " (CPU " << curr_cpu+1 << ")" << "\n";
-        pc[curr_cpu]++;       
+        pc[curr_cpu]++;   
+        tot_instructions++;    
     } else if(func == "mul") {
         regs[curr_cpu][arg1] = regs[curr_cpu][arg2] * regs[curr_cpu][arg3];
         if(VERBROSE)  cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << " (CPU " << curr_cpu+1 << ")" << "\n";
         pc[curr_cpu]++;
+        tot_instructions++;
     } else if(func == "beq") {
         if(tags[curr_cpu].find(tag) == tags[curr_cpu].end()) {
             cout << "Cannot find tag " + tag + "\n";
             exit(1);
         }
         if (regs[curr_cpu][arg1] == regs[curr_cpu][arg2]) pc[curr_cpu] = tags[curr_cpu][tag];
-        else pc[curr_cpu]++;      
+        else pc[curr_cpu]++; 
+        tot_instructions++;     
     } else if(func == "bne") {
         if(tags[curr_cpu].find(tag) == tags[curr_cpu].end()) {
             cout << "Cannot find tag " << tag << " (CPU " << curr_cpu+1 << ")" << "\n";
@@ -379,17 +387,20 @@ void execute_ins(int index, int curr_cpu) {
         }
         if (regs[curr_cpu][arg1] != regs[curr_cpu][arg2]) pc[curr_cpu] = tags[curr_cpu][tag];
         else pc[curr_cpu]++;
+        tot_instructions++;
     } else if(func == "slt") {
         if (regs[curr_cpu][arg2] < regs[curr_cpu][arg3]) regs[curr_cpu][arg1] = 1;
         else regs[curr_cpu][arg1] = 0;
         if(VERBROSE) cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << " (CPU " << curr_cpu+1 << ")" << "\n";
         pc[curr_cpu]++;
+        tot_instructions++;
     } else if(func == "j") {
         if(tags[curr_cpu].find(tag) == tags[curr_cpu].end()) {
             cout << "Cannot find tag " << tag << " (CPU " << curr_cpu+1 << ")" << "\n";
             exit(1);
         }
-        pc[curr_cpu] = tags[curr_cpu][tag];            
+        pc[curr_cpu] = tags[curr_cpu][tag];
+        tot_instructions++;       
     } else if(func == "lw") {
         int loc = arg2 + regs[curr_cpu][arg3];
         if(loc >= 0 && loc < line[curr_cpu]) {
@@ -426,6 +437,7 @@ void execute_ins(int index, int curr_cpu) {
         regs[curr_cpu][arg1] = regs[curr_cpu][arg2] + arg3;
         if(VERBROSE) cout << regs_name[arg1] << " = " << regs[curr_cpu][arg1] << " (CPU " << curr_cpu+1 << ")"  << "\n";
         pc[curr_cpu]++;
+        tot_instructions++;
     }
 }
 
