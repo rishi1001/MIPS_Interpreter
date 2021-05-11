@@ -309,7 +309,7 @@ void read(int loc, int reg, int index, int curr_cpu) {
             tot_instructions++;
             return;
         }
-        requests[curr_cpu][reg].push_back({"forward", reg, loc, tot_cycles, index});
+        requests[curr_cpu][reg].push_back({"forward", reg, loc, tot_cycles, index, curr_cpu});
         all_requests.push_back({"forward", reg, loc, tot_cycles, index, curr_cpu});
         return;
     }
@@ -346,7 +346,7 @@ void write(int loc, int reg, int index, int curr_cpu) {
         }
     }
 
-    requests[curr_cpu][reg].push_back({"sw", reg, loc, tot_cycles, index});
+    requests[curr_cpu][reg].push_back({"sw", reg, loc, tot_cycles, index, curr_cpu});
     all_requests.push_back({"sw", reg, loc, tot_cycles, index, curr_cpu});
 }
 
