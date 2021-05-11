@@ -1,0 +1,22 @@
+addi $t0,$zero,1
+sw $t0, 1000($zero)
+addi $t0,$zero,2
+sw $t0, 1004($zero)
+addi $t0,$zero,3
+sw $t0, 1008($zero)
+addi $t0,$zero,4
+sw $t0, 1012($zero)
+addi $t0,$zero,5
+sw $t0, 1016($zero)
+addi $t0,$zero,6
+sw $t0, 1020($zero) 
+addi $t1, $zero, 6 
+addi $t0, $zero,1000
+addi $t2, $zero, 0  
+sumLoop:
+lw $t3, ($t0) 
+add $t2, $t2, $t3 
+addi $t0, $t0, 4
+addi $t1, $t1, -1
+bne $t1,$zero, sumLoop
+sw $t2, 20($zero)

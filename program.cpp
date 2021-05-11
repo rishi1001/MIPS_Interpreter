@@ -2,6 +2,17 @@
 #include <boost/algorithm/string.hpp>
 using namespace std;
 
+// TODO : lw $t0, 1000($t1)
+//        add $t0, $t2, $t3 here first lw is reduntant?   
+// TODO : print total cycles lost in MRM
+// TODO : make graph while tuning the paramters, testing this on typical programs like sort, loop, maybe recursion, SPEC(benchmark), similar programs with slightly diff params
+// TODO : print pc[i] for each cpu
+// TODO : select request based on past.
+// TODO : delay in forwarding(depending upon queue size) and also delay in redunctant request removing.
+// TODO : if queue size is more then whenever we add new request to queue, again compare in the queue. (like this is drawback of having large queue)
+// TODO : Intead of showing empty clock cycles terminate the code when we are done. Also when there is an error in all the cpus, termination should happen.
+// TODO : Think for architecture of everything.
+
 int ROW_ACCESS_DELAY = 10;
 int COL_ACCESS_DELAY = 2;
 const bool OPTIMIZE = true;
@@ -48,7 +59,7 @@ int regs[MAX_CPUS][1 << 5];
 int cpus, m;
 int tot_cycles;
 int tot_lines;
-int tot_instructions;
+int tot_instructions;               
 
 int block_size;
 
@@ -74,7 +85,7 @@ int unsafe_reg[MAX_CPUS];
 bool dram_writing_flag;
 bool dram_loading;
 int count_loading_cycles;
-bool buffer_bottleneck;
+bool buffer_bottleneck;                        
 
 // TODO: Check this function
 int get_request_loading_delay() {
@@ -114,14 +125,14 @@ bool requests_pending() {
 }
 
 void load_request_helper(struct request req, int type , int curr_cpu) {
-    if(req.type == "forward") {
-        regs[req.cpu][req.reg] = mem[req.loc/4];
-        if(VERBROSE) cout << "DRAM request forwarded" << " (line: " << line_to_number[req.cpu][req.line]+1 << ", CPU: " << req.cpu+1 << ")" << "\n";
-        if(VERBROSE) cout << regs_name[req.reg] << " = " << regs[req.cpu][req.reg] << "\n";
-        dram_writing_flag = true;
-        tot_instructions++;
-        return;
-    }
+    // if(req.type == "forward") {
+    //     regs[req.cpu][req.reg] = mem[req.loc/4];
+    //     if(VERBROSE) cout << "DRAM request forwarded" << " (line: " << line_to_number[req.cpu][req.line]+1 << ", CPU: " << req.cpu+1 << ")" << "\n";
+    //     if(VERBROSE) cout << regs_name[req.reg] << " = " << regs[req.cpu][req.reg] << "\n";
+    //     dram_writing_flag = true;
+    //     tot_instructions++;
+    //     return;
+    // }
 
     if(type >= 3) jobs.push({"row_write", req.reg, req.loc, req.line, curr_cpu});
     if(type >= 2) jobs.push({"row_read", req.reg, req.loc, req.line, curr_cpu});
@@ -243,7 +254,7 @@ void print_stats() {
     }
 
     cout << "Final data values that are updated during execution: \n";
-    for(int i = tot_lines; i < (1<<18); i++) if(mem[i] != 0) cout << i*4 << "-" << i*4+3 << ": " << mem[i] << "\n";  
+    for(int i = 0; i < (1<<18); i++) if(mem[i] != 0) cout << i*4 << "-" << i*4+3 << ": " << mem[i] << "\n";  
     cout << "\n";
 
     cout << "Row buffer updates and column read/write counts\n";
@@ -296,7 +307,7 @@ void read(int loc, int reg, int index, int curr_cpu) {
         }
     }
 
-    if(!jobs.empty()) {
+    if(!jobs.empty()) {              // ? change anything here
         if(jobs.back().cpu == curr_cpu && jobs.back().loc == loc && jobs.back().cmd == "col_write") {
             found = true;
             max_reg = jobs.back().reg;
@@ -309,8 +320,12 @@ void read(int loc, int reg, int index, int curr_cpu) {
             tot_instructions++;
             return;
         }
-        requests[curr_cpu][reg].push_back({"forward", reg, loc, tot_cycles, index});
-        all_requests.push_back({"forward", reg, loc, tot_cycles, index, curr_cpu});
+        regs[curr_cpu][reg] = regs[curr_cpu][max_reg];     
+        dram_writing_flag=true;
+        cout<<"Value forwarded"<<"\n";
+        if(VERBROSE) cout << regs_name[reg] << " = " << regs[curr_cpu][reg] << " (CPU " << curr_cpu+1 << ")"  << "\n";
+        // requests[curr_cpu][reg].push_back({"forward", reg, loc, tot_cycles, index});
+        // all_requests.push_back({"forward", reg, loc, tot_cycles, index, curr_cpu});
         return;
     }
 
@@ -758,7 +773,6 @@ void process_instruction(vector<string> tokens , int curr_cpu) {
 
     instruction ins = {func, tag, arg1, arg2, arg3, count};
     mp[curr_cpu][line[curr_cpu]] = ins;
-    mem[tot_lines] = tot_lines;
 }
 
 // Read and tokenize the contents of input file
