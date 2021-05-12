@@ -468,7 +468,8 @@ bool safe_register(int reg, int curr_cpu) {
 }
 
 bool safe_register1(int reg, int curr_cpu) {
-    for(auto it = all_requests.begin(); it != all_requests.end(); it++) { // here we should also check if it is in job 
+    if(!jobs.empty() && jobs.front().reg == reg && jobs.front().cpu == curr_cpu) return false;  // this job should be for an lw instruction(how to ensure this??)
+    for(auto it = all_requests.begin(); it != all_requests.end(); it++) { 
         if(it->cpu == curr_cpu && it->reg == reg && it->type == "lw") return false;
     }
     return true;
