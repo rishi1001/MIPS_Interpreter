@@ -4,13 +4,10 @@ using namespace std;
 
 // TODO : lw $t0, 1000($t1)
 //        add $t0, $t2, $t3 here first lw is reduntant?   
-// TODO : print total cycles lost in MRM
 // TODO : make graph while tuning the paramters, testing this on typical programs like sort, loop, maybe recursion, SPEC(benchmark), similar programs with slightly diff params
-// TODO : print pc[i] for each cpu
 // TODO : select request based on past.
 // TODO : delay in forwarding(depending upon queue size) and also delay in redunctant request removing.
 // TODO : if queue size is more then whenever we add new request to queue, again compare in the queue. (like this is drawback of having large queue)
-// TODO : Intead of showing empty clock cycles terminate the code when we are done. Also when there is an error in all the cpus, termination should happen.
 // TODO : Think for architecture of everything.
 
 int ROW_ACCESS_DELAY = 10;
@@ -85,7 +82,9 @@ int unsafe_reg[MAX_CPUS];
 bool dram_writing_flag;
 bool dram_loading;
 int count_loading_cycles;
-bool buffer_bottleneck;                        
+bool buffer_bottleneck;
+
+int cycles_lost_mrm;
 
 // TODO: Check this function
 int get_request_loading_delay() {
@@ -107,6 +106,14 @@ bool is_top_request(struct request req) {
     int min_req_cycle = tot_cycles;
     for(request r : all_requests) {
         if(r.loc == req.loc) min_req_cycle = min(min_req_cycle, r.req_cycle);
+    }
+    return min_req_cycle == req.req_cycle;
+}
+
+bool is_earliest_request(struct request req) {
+    int min_req_cycle = tot_cycles;
+    for(request r : all_requests) {
+        min_req_cycle = min(min_req_cycle, r.req_cycle);
     }
     return min_req_cycle == req.req_cycle;
 }
@@ -178,7 +185,7 @@ void load_request() {
         if(!found) {
             for(int i = 0; i < cpus; i++) {
                 for(int j = 0; j < 32; j++) {
-                    if(requests[i][j].size() != 0 && is_top_request(requests[i][j].front())) {
+                    if(requests[i][j].size() != 0 && is_earliest_request(requests[i][j].front())) {  // Changed something here. If it doesnt work, revert.
                         load_cpu = i;
                         load_reg = j;
                     }
@@ -241,6 +248,14 @@ void print_stats() {
     cout << "\n";
     cout << "Total clock cycles: " << tot_cycles << "\n";
     cout << "Total instructions executed: " << tot_instructions << "\n";
+    cout << "Total extra cycles lost by MRM in calculating next request: " << cycles_lost_mrm << "\n";
+    cout << "\n";
+
+    cout << "Last instruction executed on each CPU: \n";
+    for(int i = 0; i < cpus; i++) {
+        if(pc[i] == 0) cout << "CPU " << i+1 << ": No instruction executed\n";
+        else cout << "CPU " << i+1 << ": " << line_to_number[i][pc[i]-1]+1 << "\n";
+    }
     cout << "\n";
 
     cout << "Instruction execution count\n";
@@ -255,6 +270,16 @@ void print_stats() {
 
     cout << "Final data values that are updated during execution: \n";
     for(int i = 0; i < (1<<18); i++) if(mem[i] != 0) cout << i*4 << "-" << i*4+3 << ": " << mem[i] << "\n";  
+    cout << "\n";
+
+    cout << "Final register values at the end of execution: \n";
+    for(int i = 0; i < cpus; i++) {
+        cout << "Register values for CPU " << i+1 << ":\n";
+        for(int j = 0; j < 32; j++) {
+            cout << regs[i][j] << " ";
+        }
+        cout << "\n";
+    }
     cout << "\n";
 
     cout << "Row buffer updates and column read/write counts\n";
@@ -280,6 +305,7 @@ void execute_job() {
                 count_loading_cycles = 0;
                 dram_loading = false;
             } else {
+                cycles_lost_mrm++;
                 cout << "Still selecting which job to perform" << "\n";
             }
         }
@@ -307,7 +333,7 @@ void read(int loc, int reg, int index, int curr_cpu) {
         }
     }
 
-    if(!jobs.empty()) {              // ? change anything here
+    if(!jobs.empty()) {
         if(jobs.back().cpu == curr_cpu && jobs.back().loc == loc && jobs.back().cmd == "col_write") {
             found = true;
             max_reg = jobs.back().reg;
@@ -321,8 +347,8 @@ void read(int loc, int reg, int index, int curr_cpu) {
             return;
         }
         regs[curr_cpu][reg] = regs[curr_cpu][max_reg];     
-        dram_writing_flag=true;
-        cout<<"Value forwarded"<<"\n";
+        dram_writing_flag = true;
+        cout << "Value forwarded" << "\n";
         if(VERBROSE) cout << regs_name[reg] << " = " << regs[curr_cpu][reg] << " (CPU " << curr_cpu+1 << ")"  << "\n";
         // requests[curr_cpu][reg].push_back({"forward", reg, loc, tot_cycles, index});
         // all_requests.push_back({"forward", reg, loc, tot_cycles, index, curr_cpu});
@@ -335,6 +361,7 @@ void read(int loc, int reg, int index, int curr_cpu) {
             remove_request(pre);
             requests[curr_cpu][reg].pop_back();
         }
+        cout << "An earlier redundant lw removed\n"
     }
     requests[curr_cpu][reg].push_back({"lw", reg, loc, tot_cycles, index});
     all_requests.push_back({"lw", reg, loc, tot_cycles, index, curr_cpu});
@@ -353,6 +380,7 @@ void write(int loc, int reg, int index, int curr_cpu) {
                 for(auto it1 = requests[i][it->reg].begin(); it1 != requests[i][it->reg].end(); ++it1) {
                     if(it1->req_cycle == max_clock_cycle) {
                         requests[i][it->reg].erase(it1);
+                        cout << "An earlier redundant sw removed\n";
                         break;
                     }
                 }
@@ -468,7 +496,7 @@ bool safe_register(int reg, int curr_cpu) {
 }
 
 bool safe_register1(int reg, int curr_cpu) {
-    if(!jobs.empty() && jobs.front().reg == reg && jobs.front().cpu == curr_cpu) return false;  // this job should be for an lw instruction(how to ensure this??)
+    if(!jobs.empty() && jobs.back().reg == reg && jobs.back().cpu == curr_cpu && jobs.back().cmd == "col_read") return false;
     for(auto it = all_requests.begin(); it != all_requests.end(); it++) { 
         if(it->cpu == curr_cpu && it->reg == reg && it->type == "lw") return false;
     }
@@ -489,6 +517,10 @@ bool is_safe(int index, int curr_cpu) {
 
     if(func == "add" || func == "sub" || func == "mul" || func == "slt" || func == "addi") {
         if(dram_writing_flag) return false;
+    }
+
+    if(func == "lw" || func == "sw") {
+        if(buffer_bottleneck) return false;
     }
 
     if (func == "lw"){
@@ -528,7 +560,7 @@ bool is_safe(int index, int curr_cpu) {
     }
     if(func == "addi" || func == "bne" || func == "beq") return true;
     else {
-        if (!safe_register1(arg3, curr_cpu)){
+        if(!safe_register1(arg3, curr_cpu)) {
             unsafe_reg[curr_cpu] = arg3;
             return false;
         }
@@ -548,13 +580,16 @@ void run_program() {
         for(int i = 0; i < cpus; i++) {
             if(!valid[i]) continue;
             cycles[i]++;
-            if(pc[i] != line[i] && is_safe(pc[i], i) && !buffer_bottleneck) execute_ins(pc[i], i);
+            if(pc[i] != line[i] && is_safe(pc[i], i)) execute_ins(pc[i], i);
             if(VERBROSE) {
-                cout << "Register values for CPU: " << i+1 << "\n";
-                for(int j = 0; j < 32; j++) {
-                    cout << regs[i][j] << " ";
+                if(pc[i] != line[i] || !jobs.empty()) {
+                    cout << "Register values for CPU " << i+1 << ":\n";
+                    for(int j = 0; j < 32; j++) {
+                        cout << regs[i][j] << " ";
+                    }
+                    cout << "\n";
                 }
-                cout << "\n" << "\n";
+                cout << "\n";
             }
         }
     }
@@ -834,6 +869,8 @@ void initialise() {
     count_loading_cycles = REQUEST_LOADING_DELAY;
 
     buffer_bottleneck = false;
+
+    cycles_lost_mrm = 0;
 
     tot_cycles = 0;
     tot_lines = 0;
