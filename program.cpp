@@ -14,6 +14,7 @@ using namespace std;
 // TODO : sort and fib programs and more of lw,sw with more cores
 // TODO : Check is_safe condition for lw/sw requests.
 // TODO : Can two different cpus write to their registers in a single cycle?
+// TODO : Change the input file names to t1.txt, t2.txt as per assignment specs
 
 int ROW_ACCESS_DELAY = 10;
 int COL_ACCESS_DELAY = 2;
@@ -333,7 +334,7 @@ void execute_job() {
                 dram_loading = false;
             } else {
                 cycles_lost_mrm++;
-                cout << "Still selecting which job to perform" << "\n";
+                if(VERBROSE) cout << "Still selecting which job to perform" << "\n";
             }
         }
     }
@@ -376,7 +377,7 @@ void read(int loc, int reg, int index, int curr_cpu) {
         if(safe_register2(reg, curr_cpu)) {
             regs[curr_cpu][reg] = regs[curr_cpu][max_reg];     
             dram_writing_flag = true;
-            cout << "Value forwarded" << "\n";
+            if(VERBROSE) cout << "Value forwarded" << "\n";
             if(VERBROSE) cout << regs_name[reg] << " = " << regs[curr_cpu][reg] << " (CPU " << curr_cpu+1 << ")"  << "\n";
             // requests[curr_cpu][reg].push_back({"forward", reg, loc, tot_cycles, index});
             // all_requests.push_back({"forward", reg, loc, tot_cycles, index, curr_cpu});
@@ -389,7 +390,7 @@ void read(int loc, int reg, int index, int curr_cpu) {
         if(pre.type == "lw") {
             remove_request(pre);
             requests[curr_cpu][reg].pop_back();
-            cout << "An earlier redundant lw removed\n";
+            if(VERBROSE) cout << "An earlier redundant lw removed\n";
         }
     }
     requests[curr_cpu][reg].push_back({"lw", reg, loc, tot_cycles, index});
@@ -409,7 +410,7 @@ void write(int loc, int reg, int index, int curr_cpu) {
                 for(auto it1 = requests[i][it->reg].begin(); it1 != requests[i][it->reg].end(); ++it1) {
                     if(it1->req_cycle == max_clock_cycle) {
                         requests[i][it->reg].erase(it1);
-                        cout << "An earlier redundant sw removed\n";
+                        if(VERBROSE) cout << "An earlier redundant sw removed\n";
                         break;
                     }
                 }
