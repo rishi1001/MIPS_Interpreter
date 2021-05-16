@@ -2,19 +2,15 @@
 #include <boost/algorithm/string.hpp>
 using namespace std;
 
-// TODO : lw $t0, 1000($t1)
-//        add $t0, $t2, $t3 here first lw is reduntant?   
+
 // TODO : make graph while tuning the paramters, testing this on typical programs like sort, loop, maybe recursion, SPEC(benchmark), similar programs with slightly diff params
 // TODO : select request based on past.
 // TODO : delay in forwarding(depending upon queue size) and also delay in redunctant request removing.
 // TODO : if queue size is more then whenever we add new request to queue, again compare in the queue. (like this is drawback of having large queue)
 // TODO : Think for architecture of everything.
-// TODO : Include '#' in parsing to comment out?
 // TODO : will make a log file like last time(for comparing cycles)
 // TODO : sort and fib programs and more of lw,sw with more cores
 // TODO : Check is_safe condition for lw/sw requests.
-// TODO : Can two different cpus write to their registers in a single cycle?
-// TODO : Change the input file names to t1.txt, t2.txt as per assignment specs
 
 int ROW_ACCESS_DELAY = 10;
 int COL_ACCESS_DELAY = 2;
@@ -85,7 +81,7 @@ deque<request> requests[MAX_CPUS][32];
 vector<request> all_requests;
 int unsafe_reg[MAX_CPUS];
 
-bool dram_writing_flag;
+bool dram_writing_flag[MAX_CPUS];
 bool dram_loading;
 int count_loading_cycles;
 bool buffer_bottleneck;
@@ -160,14 +156,6 @@ bool requests_pending() {
 }
 
 void load_request_helper(struct request req, int type , int curr_cpu) {
-    // if(req.type == "forward") {
-    //     regs[req.cpu][req.reg] = mem[req.loc/4];
-    //     if(VERBROSE) cout << "DRAM request forwarded" << " (line: " << line_to_number[req.cpu][req.line]+1 << ", CPU: " << req.cpu+1 << ")" << "\n";
-    //     if(VERBROSE) cout << regs_name[req.reg] << " = " << regs[req.cpu][req.reg] << "\n";
-    //     dram_writing_flag = true;
-    //     tot_instructions++;
-    //     return;
-    // }
 
     if(type >= 3) jobs.push({"row_write", req.reg, req.loc, req.line, curr_cpu});
     if(type >= 2) jobs.push({"row_read", req.reg, req.loc, req.line, curr_cpu});
@@ -258,7 +246,7 @@ void finish_job(job j) {
         regs[j.cpu][j.reg] = mem[j.loc/4];
         if(VERBROSE) cout << "DRAM column reading completed for location " << j.loc << " (line: " << line_to_number[j.cpu][j.line]+1 << ", CPU: " << j.cpu+1 << ")" << "\n";
         if(VERBROSE) cout << regs_name[j.reg] << " = " << regs[j.cpu][j.reg] << "\n";
-        dram_writing_flag = true;
+        dram_writing_flag[j.cpu] = true;
         col_read++;
         tot_instructions++;
     } else {
@@ -369,18 +357,11 @@ void read(int loc, int reg, int index, int curr_cpu) {
     }
 
     if(found) {
-        // if(max_reg == reg) {
-        //     cout << "Current instruction is ignored due to redundancy\n";
-        //     tot_instructions++;
-        //     return;
-        // }
         if(safe_register2(reg, curr_cpu)) {
             regs[curr_cpu][reg] = regs[curr_cpu][max_reg];     
-            dram_writing_flag = true;
+            dram_writing_flag[curr_cpu] = true;
             if(VERBROSE) cout << "Value forwarded" << "\n";
             if(VERBROSE) cout << regs_name[reg] << " = " << regs[curr_cpu][reg] << " (CPU " << curr_cpu+1 << ")"  << "\n";
-            // requests[curr_cpu][reg].push_back({"forward", reg, loc, tot_cycles, index});
-            // all_requests.push_back({"forward", reg, loc, tot_cycles, index, curr_cpu});
             return;
         }
     }
@@ -493,7 +474,6 @@ void execute_ins(int index, int curr_cpu) {
         }
         read(loc+offset[curr_cpu], arg1, index , curr_cpu);
         buffer_bottleneck = true;
-        // regs[arg1] = mem[loc/4];
         pc[curr_cpu]++;
     } else if(func == "sw") {
         int loc = arg2 + regs[curr_cpu][arg3];
@@ -532,7 +512,7 @@ bool is_safe(int index, int curr_cpu) {
     int arg3 = mp[curr_cpu][index].arg3;
 
     if(func == "add" || func == "sub" || func == "mul" || func == "slt" || func == "addi") {
-        if(dram_writing_flag) return false;
+        if(dram_writing_flag[curr_cpu]) return false;
     }
 
     if(func == "lw" || func == "sw") {
@@ -540,6 +520,10 @@ bool is_safe(int index, int curr_cpu) {
     }
 
     if (func == "lw") {
+        if(!safe_register1(arg3, curr_cpu)) {                 // anything else to do like forwarding ?
+            unsafe_reg[curr_cpu] = arg3;
+            return false;
+        }
         if(!requests[curr_cpu][arg1].empty()){
             request pre = requests[curr_cpu][arg1].back();
             if(pre.type == "lw") {
@@ -551,6 +535,10 @@ bool is_safe(int index, int curr_cpu) {
     }
 
     if (func == "sw") {
+        if(!safe_register1(arg3, curr_cpu)) {
+            unsafe_reg[curr_cpu] = arg3;
+            return false;
+        }
         int loc = arg2 + regs[curr_cpu][arg3];
         int max_clock_cycle = -1;
         for(request req : all_requests) {
@@ -587,7 +575,7 @@ bool is_safe(int index, int curr_cpu) {
 // Run the program
 void run_program() {
     while(tot_cycles < m) {
-        if(dram_writing_flag) dram_writing_flag = false;
+        for(int i = 0; i < cpus; i++) dram_writing_flag[i] = false;
         if(buffer_bottleneck) buffer_bottleneck = false;
         tot_cycles++;
         count_loading_cycles++;
@@ -861,7 +849,7 @@ void read_file(string file_name , int curr_cpu) {
 
 void read_all_files(string folder) {
     for(int i = 0; i < cpus; i++) {
-        string file_name = folder+"f" + to_string(i+1);
+        string file_name = folder+"t" + to_string(i+1)+ ".txt";
         read_file(file_name, i);
     }
 }
@@ -879,9 +867,9 @@ void initialise() {
         offset[i] = i*block_size;
         for(int j = 0; j < (1<<5); j++) regs[i][j] = 0;
         regs[i][29] = offset[i] + block_size;                // stack pointer 
+        dram_writing_flag[i] = false;
     }
 
-    dram_writing_flag = false;
     dram_loading = false;
     count_loading_cycles = REQUEST_LOADING_DELAY;
 
