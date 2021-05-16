@@ -13,7 +13,6 @@ sw $t0, 1020($zero)
 addi $t0, $zero, 1000 
 addi $t1, $zero, 0 
 addi $t2, $zero, 6 
-addi $sp, $zero, 500
 pushLoop:
 lw $t4, ($t0) 
 addi $sp, $sp, -4 

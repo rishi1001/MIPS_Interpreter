@@ -10,6 +10,8 @@ using namespace std;
 // TODO : if queue size is more then whenever we add new request to queue, again compare in the queue. (like this is drawback of having large queue)
 // TODO : Think for architecture of everything.
 // TODO : Include '#' in parsing to comment out?
+// TODO : will make a log file like last time(for comparing cycles)
+// TODO : sort and fib programs and more of lw,sw with more cores
 
 int ROW_ACCESS_DELAY = 10;
 int COL_ACCESS_DELAY = 2;
@@ -863,6 +865,7 @@ void initialise() {
         valid[i] = true;
         offset[i] = i*block_size;
         for(int j = 0; j < (1<<5); j++) regs[i][j] = 0;
+        regs[i][29]=offset[i]+block_size;                // stack pointer 
     }
 
     dram_writing_flag = false;
