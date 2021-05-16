@@ -9,6 +9,7 @@ using namespace std;
 // TODO : delay in forwarding(depending upon queue size) and also delay in redunctant request removing.
 // TODO : if queue size is more then whenever we add new request to queue, again compare in the queue. (like this is drawback of having large queue)
 // TODO : Think for architecture of everything.
+// TODO : Include '#' in parsing to comment out?
 
 int ROW_ACCESS_DELAY = 10;
 int COL_ACCESS_DELAY = 2;
@@ -361,7 +362,7 @@ void read(int loc, int reg, int index, int curr_cpu) {
             remove_request(pre);
             requests[curr_cpu][reg].pop_back();
         }
-        cout << "An earlier redundant lw removed\n"
+        cout << "An earlier redundant lw removed\n";
     }
     requests[curr_cpu][reg].push_back({"lw", reg, loc, tot_cycles, index});
     all_requests.push_back({"lw", reg, loc, tot_cycles, index, curr_cpu});
