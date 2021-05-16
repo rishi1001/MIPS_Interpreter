@@ -12,13 +12,15 @@ using namespace std;
 // TODO : Include '#' in parsing to comment out?
 // TODO : will make a log file like last time(for comparing cycles)
 // TODO : sort and fib programs and more of lw,sw with more cores
+// TODO : Check is_safe condition for lw/sw requests.
+// TODO : Can two different cpus write to their registers in a single cycle?
 
 int ROW_ACCESS_DELAY = 10;
 int COL_ACCESS_DELAY = 2;
 const bool OPTIMIZE = true;
 const bool VERBROSE = true;
 const int MAX_CPUS = 16;
-const int MAX_MRM_SIZE = 10; // TODO: Tune this paramater
+const int MAX_MRM_SIZE = 40; // TODO: Tune this paramater
 const int REQUEST_LOADING_DELAY = MAX_MRM_SIZE / 2;
 
 struct instruction {
@@ -91,7 +93,7 @@ int cycles_lost_mrm;
 
 // TODO: Check this function
 int get_request_loading_delay() {
-    return all_requests.size() / 2;
+    return REQUEST_LOADING_DELAY;
 }
 
 string trim(string str, string whitespace = " \t") {
@@ -103,6 +105,28 @@ string trim(string str, string whitespace = " \t") {
     const auto strRange = strEnd - strBegin + 1;
 
     return str.substr(strBegin, strRange);
+}
+
+bool safe_register(int reg, int curr_cpu) {
+    if(!jobs.empty() && jobs.front().reg == reg && jobs.front().cpu == curr_cpu) return false;
+    if(requests[curr_cpu][reg].size() != 0) return false;
+    return true;
+}
+
+bool safe_register1(int reg, int curr_cpu) {
+    if(!jobs.empty() && jobs.back().reg == reg && jobs.back().cpu == curr_cpu && jobs.back().cmd == "col_read") return false;
+    for(auto it = all_requests.begin(); it != all_requests.end(); it++) { 
+        if(it->cpu == curr_cpu && it->reg == reg && it->type == "lw") return false;
+    }
+    return true;
+}
+
+bool safe_register2(int reg, int curr_cpu) {
+    if(!jobs.empty() && jobs.back().reg == reg && jobs.back().cpu == curr_cpu && jobs.back().cmd == "col_write") return false;
+    for(auto it = all_requests.begin(); it != all_requests.end(); it++) { 
+        if(it->cpu == curr_cpu && it->reg == reg && it->type == "sw") return false;
+    }
+    return true;
 }
 
 bool is_top_request(struct request req) {
@@ -337,25 +361,27 @@ void read(int loc, int reg, int index, int curr_cpu) {
     }
 
     if(!jobs.empty()) {
-        if(jobs.back().cpu == curr_cpu && jobs.back().loc == loc && jobs.back().cmd == "col_write") {
+        if(jobs.back().cpu == curr_cpu && jobs.back().loc == loc && jobs.back().cmd == "col_write" && max_cycle == -1) {
             found = true;
             max_reg = jobs.back().reg;
         }
     }
 
     if(found) {
-        if(max_reg == reg) {
-            cout << "Current instruction is ignored due to redundancy\n";
-            tot_instructions++;
+        // if(max_reg == reg) {
+        //     cout << "Current instruction is ignored due to redundancy\n";
+        //     tot_instructions++;
+        //     return;
+        // }
+        if(safe_register2(reg, curr_cpu)) {
+            regs[curr_cpu][reg] = regs[curr_cpu][max_reg];     
+            dram_writing_flag = true;
+            cout << "Value forwarded" << "\n";
+            if(VERBROSE) cout << regs_name[reg] << " = " << regs[curr_cpu][reg] << " (CPU " << curr_cpu+1 << ")"  << "\n";
+            // requests[curr_cpu][reg].push_back({"forward", reg, loc, tot_cycles, index});
+            // all_requests.push_back({"forward", reg, loc, tot_cycles, index, curr_cpu});
             return;
         }
-        regs[curr_cpu][reg] = regs[curr_cpu][max_reg];     
-        dram_writing_flag = true;
-        cout << "Value forwarded" << "\n";
-        if(VERBROSE) cout << regs_name[reg] << " = " << regs[curr_cpu][reg] << " (CPU " << curr_cpu+1 << ")"  << "\n";
-        // requests[curr_cpu][reg].push_back({"forward", reg, loc, tot_cycles, index});
-        // all_requests.push_back({"forward", reg, loc, tot_cycles, index, curr_cpu});
-        return;
     }
 
     if(!requests[curr_cpu][reg].empty()){
@@ -363,8 +389,8 @@ void read(int loc, int reg, int index, int curr_cpu) {
         if(pre.type == "lw") {
             remove_request(pre);
             requests[curr_cpu][reg].pop_back();
+            cout << "An earlier redundant lw removed\n";
         }
-        cout << "An earlier redundant lw removed\n";
     }
     requests[curr_cpu][reg].push_back({"lw", reg, loc, tot_cycles, index});
     all_requests.push_back({"lw", reg, loc, tot_cycles, index, curr_cpu});
@@ -492,20 +518,6 @@ void execute_ins(int index, int curr_cpu) {
     }
 }
 
-bool safe_register(int reg, int curr_cpu) {
-    if(!jobs.empty() && jobs.front().reg == reg && jobs.front().cpu == curr_cpu) return false;
-    if(requests[curr_cpu][reg].size() != 0) return false;
-    return true;
-}
-
-bool safe_register1(int reg, int curr_cpu) {
-    if(!jobs.empty() && jobs.back().reg == reg && jobs.back().cpu == curr_cpu && jobs.back().cmd == "col_read") return false;
-    for(auto it = all_requests.begin(); it != all_requests.end(); it++) { 
-        if(it->cpu == curr_cpu && it->reg == reg && it->type == "lw") return false;
-    }
-    return true;
-}
-
 // Checks if an instruction is safe for execution
 bool is_safe(int index, int curr_cpu) {
     if(!OPTIMIZE) {
@@ -526,7 +538,7 @@ bool is_safe(int index, int curr_cpu) {
         if(buffer_bottleneck) return false;
     }
 
-    if (func == "lw"){
+    if (func == "lw") {
         if(!requests[curr_cpu][arg1].empty()){
             request pre = requests[curr_cpu][arg1].back();
             if(pre.type == "lw") {
@@ -537,7 +549,7 @@ bool is_safe(int index, int curr_cpu) {
         else return true;
     }
 
-    if (func=="sw"){
+    if (func == "sw") {
         int loc = arg2 + regs[curr_cpu][arg3];
         int max_clock_cycle = -1;
         for(request req : all_requests) {
@@ -865,7 +877,7 @@ void initialise() {
         valid[i] = true;
         offset[i] = i*block_size;
         for(int j = 0; j < (1<<5); j++) regs[i][j] = 0;
-        regs[i][29]=offset[i]+block_size;                // stack pointer 
+        regs[i][29] = offset[i] + block_size;                // stack pointer 
     }
 
     dram_writing_flag = false;
