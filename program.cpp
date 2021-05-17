@@ -2,22 +2,12 @@
 #include <boost/algorithm/string.hpp>
 using namespace std;
 
-
-// TODO : make graph while tuning the paramters, testing this on typical programs like sort, loop, maybe recursion, SPEC(benchmark), similar programs with slightly diff params
-// TODO : select request based on past.
-// TODO : delay in forwarding(depending upon queue size) and also delay in redunctant request removing.
-// TODO : if queue size is more then whenever we add new request to queue, again compare in the queue. (like this is drawback of having large queue)
-// TODO : Think for architecture of everything.
-// TODO : will make a log file like last time(for comparing cycles)
-// TODO : sort and fib programs and more of lw,sw with more cores
-// TODO : Check is_safe condition for lw/sw requests.
-
 int ROW_ACCESS_DELAY = 10;
 int COL_ACCESS_DELAY = 2;
 const bool OPTIMIZE = true;
 const bool VERBROSE = false;
 const int MAX_CPUS = 16;
-const int MAX_MRM_SIZE = 30; // TODO: Tune this paramater
+const int MAX_MRM_SIZE = 15;
 const int REQUEST_LOADING_DELAY = MAX_MRM_SIZE / 2;
 
 struct instruction {
@@ -88,7 +78,6 @@ bool buffer_bottleneck;
 
 int cycles_lost_mrm;
 
-// TODO: Check this function
 int get_request_loading_delay() {
     return REQUEST_LOADING_DELAY;
 }
@@ -200,10 +189,21 @@ void load_request() {
         if(!found) {
             for(int i = 0; i < cpus; i++) {
                 for(int j = 0; j < 32; j++) {
-                    if(requests[i][j].size() != 0 && is_earliest_request(requests[i][j].front())) {  // Changed something here. If it doesnt work, revert.
+                    if(requests[i][j].size() != 0 && is_earliest_request(requests[i][j].front())) {
                         load_cpu = i;
                         load_reg = j;
                     }
+                }
+            }
+        }
+    }
+
+    if(load_cpu == -1) {
+        for(int i = 0; i < cpus; i++) {
+            for(int j = 0; j < 32; j++) {
+                if(requests[i][j].size() != 0) {
+                    load_cpu = i;
+                    load_reg = j;
                 }
             }
         }
@@ -373,7 +373,7 @@ void read(int loc, int reg, int index, int curr_cpu) {
             if(VERBROSE) cout << "An earlier redundant lw removed\n";
         }
     }
-    requests[curr_cpu][reg].push_back({"lw", reg, loc, tot_cycles, index});
+    requests[curr_cpu][reg].push_back({"lw", reg, loc, tot_cycles, index, curr_cpu});
     all_requests.push_back({"lw", reg, loc, tot_cycles, index, curr_cpu});
 }
 
@@ -519,7 +519,7 @@ bool is_safe(int index, int curr_cpu) {
     }
 
     if (func == "lw") {
-        if(!safe_register1(arg3, curr_cpu)) {                 // anything else to do like forwarding ?
+        if(!safe_register1(arg3, curr_cpu)) {
             unsafe_reg[curr_cpu] = arg3;
             return false;
         }

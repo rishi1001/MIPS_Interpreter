@@ -22,7 +22,7 @@ main:
     addi  $t0, $zero, 1000      
     addi $t0, $t0, 40                 
 outterLoop:             
-    add $t1, $zero, $zero    
+    add $t1, $zero, $zero
     addi  $a0, $zero, 1000
 innerLoop:              
     lw  $t2, 0($a0)      
