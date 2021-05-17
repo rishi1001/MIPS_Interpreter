@@ -15,9 +15,9 @@ using namespace std;
 int ROW_ACCESS_DELAY = 10;
 int COL_ACCESS_DELAY = 2;
 const bool OPTIMIZE = true;
-const bool VERBROSE = true;
+const bool VERBROSE = false;
 const int MAX_CPUS = 16;
-const int MAX_MRM_SIZE = 10; // TODO: Tune this paramater
+const int MAX_MRM_SIZE = 30; // TODO: Tune this paramater
 const int REQUEST_LOADING_DELAY = MAX_MRM_SIZE / 2;
 
 struct instruction {
@@ -156,7 +156,6 @@ bool requests_pending() {
 }
 
 void load_request_helper(struct request req, int type , int curr_cpu) {
-
     if(type >= 3) jobs.push({"row_write", req.reg, req.loc, req.line, curr_cpu});
     if(type >= 2) jobs.push({"row_read", req.reg, req.loc, req.line, curr_cpu});
     if(req.type == "lw") jobs.push({"col_read", req.reg, req.loc, req.line, curr_cpu});
@@ -207,7 +206,7 @@ void load_request() {
                     }
                 }
             }
-        }  
+        }
     }
 
     load_request_helper(requests[load_cpu][load_reg].front(), type, load_cpu);
@@ -530,7 +529,10 @@ bool is_safe(int index, int curr_cpu) {
                 return true;
             }
         }
-        if(all_requests.size() >= MAX_MRM_SIZE) return false;
+        if(all_requests.size() >= MAX_MRM_SIZE) {
+            if(VERBROSE) cout << "DRAM Full. Waiting.....\n";
+            return false;
+        }
         else return true;
     }
 
@@ -549,7 +551,10 @@ bool is_safe(int index, int curr_cpu) {
                 return true;
             }
         }
-        if(all_requests.size() >= MAX_MRM_SIZE) return false;
+        if(all_requests.size() >= MAX_MRM_SIZE) {
+            if(VERBROSE) cout << "DRAM Full. Waiting.....\n";
+            return false;
+        }
         else return true;            
     }
     
