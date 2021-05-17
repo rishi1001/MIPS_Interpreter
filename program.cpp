@@ -17,7 +17,7 @@ int COL_ACCESS_DELAY = 2;
 const bool OPTIMIZE = true;
 const bool VERBROSE = true;
 const int MAX_CPUS = 16;
-const int MAX_MRM_SIZE = 40; // TODO: Tune this paramater
+const int MAX_MRM_SIZE = 10; // TODO: Tune this paramater
 const int REQUEST_LOADING_DELAY = MAX_MRM_SIZE / 2;
 
 struct instruction {

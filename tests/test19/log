@@ -1,0 +1,9 @@
+OPTIMSED, NON-OPTIMSED
+
+t1:
+Cycle- 2232,1977
+Row read: 30,30
+Row writes: 29,29
+Col reads: 200,200
+Col writes: 100,100
+MATCH
